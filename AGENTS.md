@@ -4,7 +4,7 @@
 
 This project uses Spectra for Spec-Driven Development(SDD). Specs live in `openspec/specs/`, change proposals in `openspec/changes/`.
 
-## Use `$spectra-*` skills when:
+## Use `$spectra-*` skills when
 
 - A discussion needs structure before coding → `$spectra-discuss`
 - User wants to plan, propose, or design a change → `$spectra-propose`
@@ -29,10 +29,29 @@ Changes can be parked（暫存）— temporarily moved out of `openspec/changes/
 
 # Hard Fork Context
 
-This repository is a hard fork of `chuspeeism/dashi-taskboard`; upstream compatibility is not a constraint.
-Before touching code, read `handoff.md` (decisions and current state) and `fork-plan.md` (Step 0-3, bd-1~7, change 1~3).
+This repository is a hard fork of `chuspeeism/dashi-taskboard` (pushed to `sarimjang/dashi-taskboard`, kept as git remote `origin`; upstream stays a read-only remote named `upstream`); upstream compatibility is not a constraint.
+Before touching code, read `docs/planning/handoff.md` (decisions and current state) and `docs/planning/fork-plan.md` (Step 0-3, bd-1~7, change 1~3).
 Single-point fixes are tracked with Beads; cross-module removals and provider refactors go through Spectra changes under `openspec/changes/`.
-Do not start implementation until Step 0 (restoring the `vitest` / `miniflare` test loop) is complete.
+Step 0 (the `vitest` / `miniflare` test loop) is complete — `npm ci` followed by `npm test` is a green baseline (see Build & Test below for a known flaky test).
+
+## Build & Test
+
+```bash
+npm ci
+npm test                  # node --test && vitest (components)
+npm run test:cloud        # miniflare-based cloud worker tests
+```
+
+`test/inject-fullheight-regression.test.mjs` spawns real headless Chrome and has been observed to fail once under full-suite concurrency while passing in isolation. Treat a lone failure there as flaky before treating it as a regression — rerun the file alone (`node --test test/inject-fullheight-regression.test.mjs`) and rerun the full suite once before concluding the baseline is red.
+
+## Linear Sync (Beads ↔ Linear)
+
+Beads is the execution SSOT. Linear project `dashi-taskboard · Hard Fork Delivery` (Mebase team, `linear.team_id` / `linear.project_id` set via `bd config`) mirrors it for portfolio view. Conflicts resolve in favor of Beads (`--prefer-local`).
+
+- `LINEAR_API_KEY` MUST be an environment variable, never `bd config set linear.api_key` — `.beads/config.yaml` is git-tracked by default and this repo's fork gets pushed to a public remote.
+- `bd linear sync --push` (batch mode) has been observed to report every issue as `skipped` (see `--json` output: `"skipped": N`) even with `linear.state_map.*` and `linear.priority_map.*` configured. Root cause not yet identified.
+- **Workaround:** push explicitly by ID instead — `bd linear push <id> [<id>...]`. This has worked reliably. Re-test batch `sync --push`/`sync --pull` before relying on them; if the skip persists, keep using per-ID push.
+- `bd linear status` shows current link state (`With Linear` vs `Local Only`) without making changes.
 
 # Project Development Rules
 
@@ -250,7 +269,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See <https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md> for details and anti-patterns.
 
 ## Agent Context Profiles
 
@@ -268,6 +287,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **Handle git/sync by active profile**:
+
    ```bash
    # Conservative/minimal/default: report status and proposed commands; wait for approval.
    git status
@@ -278,9 +298,11 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
    git push
    git status
    ```
+
 5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
 
 **Critical rules:**
+
 - Explicit user or orchestrator instructions override this Beads block.
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
@@ -307,5 +329,5 @@ bd prime                # Refresh Beads context
 - Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
 - Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See <https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md> for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->

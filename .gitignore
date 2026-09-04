@@ -23,3 +23,7 @@ src-tauri/target/
 
 # Spectra app data
 .spectra/
+
+# Local agent/session scratch state (not project source)
+.codex-tmp/
+.omc/

@@ -20,3 +20,6 @@ src-tauri/target/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Spectra app data
+.spectra/

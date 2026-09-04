@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "dashi_taskboard",
+  "project_id": "1628f78d-56e9-4522-a593-51559dd34822"
+}

@@ -62,6 +62,8 @@ architect.md 原始的 `ProviderCapabilities` 是給「provider 本身」的能�
 
 **排除範圍**：不新增任何真實的第二個 provider、不變動資料庫 schema、不變動 `buildJiraJql`/`taskStatusFromJira`/`taskPriorityFromJira` 既有的資料轉換邏輯本身（這些函式維持原樣，只是被納入實作 `IssueProvider` 介面的物件內）。
 
+> **§5 執行後校正（apply-executor pca-group5 發現、獨立審查前 PM 已核實，非阻斷）**：驗收判準第 1 項的全 repo grep，§5 完成後在 `web/src/App.tsx:1898`（Jira 專案 labels 陣列從已同步 issue 資料重新計算的邏輯）與 `web/src/components/TaskDetail.tsx:1772`（`onDeleteLabel` 是否啟用）仍各留有一筆字面 `source` 比對。apply-executor 與 PM 各自獨立判斷後一致認為：這兩處問的是「這個 task/project 的資料是否由外部 provider 管理／衍生」，不是 12 個 capabilities 欄位裡任何一個「這個 provider 能不能做某件事」的能力宣告——若勉強套用最接近的欄位（如 `manualDelete`，語意其實是「能不能刪除整個 task」而非「能不能刪除 task 身上的一個 label」）會製造語意錯誤的耦合，不符合 CLAUDE.md「MUST NOT 編造查不到的事實」的精神。PM 決定：正確修法不是新增第 13 個 capabilities 欄位（會擴大本 change 的 Non-Goals 範圍），而是沿用 §4 已通過獨立審查的「provider 存在性」模式（`getProvider(source) !== null` 取代字面 `source === "jira"` 比對——見 `server/app.mjs` 的 PATCH 路由）：這兩處問的本質正是「這個 task/project 是否有一個已註冊的 provider 在管理它」，與 §4 的判斷邏輯完全同構，現行系統下 `getProvider("jira") !== null`、`getProvider("local") === null`，與現行字面比對逐值等價、零行為變化。這個修正已併入 §6（`pca-group6`）的範圍執行，不另開一輪——理由：只有兩行、修法已有 §4 的獨立審查先例佐證，另開一輪成本大於效益。§6 執行前，驗收判準第 1 項在這兩個檔案上尚未 100% 達成，屬已知、有明確修復路徑的暫時性缺口，非遺漏。
+
 ## Risks / Trade-offs
 
 [新增的 `capabilities` API 欄位可能被前端某處遺漏未讀取，導致該處 UI 判斷邏輯未被替換乾淨] → 全 repo grep `source === "jira"`/`source !== "jira"` 作為驗收判準第 1 項，不依賴人工逐一檢查。

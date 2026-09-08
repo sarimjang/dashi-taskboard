@@ -674,7 +674,7 @@ test("configured server proxies business APIs without touching local rows and ad
   }
 });
 
-test("cloud mode exposes machine capabilities only to loopback while local mode keeps LAN access", async (t) => {
+test("cloud mode and local mode both reject LAN clients when LAN access is not configured", async (t) => {
   const lanAddress = firstLanAddress();
   if (!lanAddress) {
     t.skip("No non-loopback IPv4 interface is available");
@@ -710,25 +710,27 @@ test("cloud mode exposes machine capabilities only to loopback while local mode 
     ]) {
       const response = await fetch(`${lanBaseUrl}${pathname}`);
       assert.equal(response.status, 403, pathname);
-      assert.equal((await response.json()).error.code, "LOCAL_ONLY", pathname);
+      assert.equal((await response.json()).error.code, "LAN_ACCESS_DENIED", pathname);
     }
     const projectResponse = await fetch(`${lanBaseUrl}/api/projects`);
     assert.equal(projectResponse.status, 403);
-    assert.equal((await projectResponse.json()).error.code, "LOCAL_ONLY");
+    assert.equal((await projectResponse.json()).error.code, "LAN_ACCESS_DENIED");
     const taskResponse = await fetch(`${lanBaseUrl}/api/tasks`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ projectId: "portfolio", title: "Must not proxy" }),
     });
     assert.equal(taskResponse.status, 403);
-    assert.equal((await taskResponse.json()).error.code, "LOCAL_ONLY");
+    assert.equal((await taskResponse.json()).error.code, "LAN_ACCESS_DENIED");
     assert.equal(upstreamCalls, 0);
 
     await store.clearCloud();
     const localResponse = await fetch(`${lanBaseUrl}/api/device-workspaces`);
-    assert.equal(localResponse.status, 200);
+    assert.equal(localResponse.status, 403);
+    assert.equal((await localResponse.json()).error.code, "LAN_ACCESS_DENIED");
     const localProjects = await fetch(`${lanBaseUrl}/api/projects`);
-    assert.equal(localProjects.status, 200);
+    assert.equal(localProjects.status, 403);
+    assert.equal((await localProjects.json()).error.code, "LAN_ACCESS_DENIED");
   } finally {
     await app.close();
   }

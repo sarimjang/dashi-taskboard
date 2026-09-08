@@ -3235,6 +3235,26 @@ kbd {
   display: none;
 }
 
+.issue-description-document .markdown-image-gate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: var(--border-hairline) dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.issue-description-document .markdown-image-gate.is-blocked {
+  cursor: default;
+  color: var(--danger);
+  border-style: solid;
+}
+
 .issue-conversation-list {
   display: grid;
   justify-items: start;
@@ -4059,6 +4079,11 @@ kbd {
   height: 100%;
   border-radius: inherit;
   object-fit: cover;
+}
+
+.actor-avatar.is-avatar-gate {
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .actor-avatar-agent-image {
@@ -5941,6 +5966,28 @@ kbd {
 .inline-media-image button:disabled {
   cursor: wait;
   opacity: 0.55;
+}
+
+.inline-media-image .inline-media-image-gate {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  border: var(--border-hairline) dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inline-media-image .inline-media-image-gate.is-blocked {
+  cursor: default;
+  color: var(--danger);
+  border-style: solid;
 }
 
 .codex-link-row {
@@ -8978,6 +9025,21 @@ kbd {
 
 .task-card-media.is-clamped img {
   height: 100%;
+}
+
+.task-card-media-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 64px;
+  padding: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
 }
 
 .task-unread-dot {

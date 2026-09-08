@@ -372,3 +372,49 @@ describe("InlineMediaComposer completion references", () => {
     expect(screen.getByTestId("serialized").textContent).toBe("@late");
   });
 });
+
+describe("InlineMediaComposer persisted image media policy", () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  function renderPersisted(markdown: string) {
+    const segments = createInlineMediaSegments(markdown, []);
+    return render(
+      <InlineMediaComposer
+        segments={segments}
+        onChange={() => {}}
+        onError={() => {}}
+        referenceTasks={[]}
+        placeholder=""
+        ariaLabel="probe"
+      />,
+    );
+  }
+
+  it("renders a persisted Taskboard attachment image immediately, with no click required", () => {
+    renderPersisted("![cover](api/attachments/attachment-1/content)");
+
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("api/attachments/attachment-1/content");
+    expect(screen.queryByRole("button", { name: /点击加载外部图片|load external image/i })).toBeNull();
+  });
+
+  it("gates a persisted external image behind a click before it produces a network request", () => {
+    renderPersisted("![pixel](https://tracker.invalid/pixel.png)");
+
+    expect(document.querySelector("img")).toBeNull();
+    const gate = screen.getByRole("button", { name: /点击加载外部图片|load external image/i });
+
+    fireEvent.click(gate);
+
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("https://tracker.invalid/pixel.png");
+  });
+
+  it("blocks a persisted image pointing at a loopback or private network destination outright", () => {
+    renderPersisted("![probe](http://169.254.169.254/latest/meta-data/)");
+
+    expect(document.querySelector("img")).toBeNull();
+    expect(screen.queryByRole("button", { name: /点击加载外部图片|load external image/i })).toBeNull();
+    expect(screen.getByRole("img", { name: /blocked|已阻止/i })).toBeTruthy();
+  });
+});

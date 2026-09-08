@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# push-relay (herdr evidence-branch-bootstrap.md §2): zero-judgment auto-push.
+# Failure only logs, never blocks the commit. Allowlist is the safety boundary
+# since worktrees (incl. the blackboard evidence-branch mount) share this hooksPath.
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+case "$branch" in main|agents/evidence) ;; *) exit 0 ;; esac
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd) || exit 0
+log="$common/push-relay.log"
+if git push origin "$branch" >>"$log" 2>&1; then
+  echo "$(date -u +%FT%TZ) pushed $branch" >>"$log"
+else
+  echo "$(date -u +%FT%TZ) PUSH-FAILED $branch (left for patrol)" >>"$log"
+fi

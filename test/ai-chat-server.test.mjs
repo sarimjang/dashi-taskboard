@@ -320,7 +320,7 @@ test("thread management, interrupt and query contracts stay narrow", async () =>
   }
 });
 
-test("local AI routes reject private-LAN clients while ordinary API routes remain available", async (context) => {
+test("local AI routes and ordinary API routes both reject unauthenticated private-LAN clients", async (context) => {
   const address = privateLanAddress();
   if (!address) {
     context.skip("No private LAN interface is available");
@@ -330,13 +330,14 @@ test("local AI routes reject private-LAN clients while ordinary API routes remai
   const port = fixture.app.server.address().port;
   try {
     const projects = await requestFrom(address, port, "/api/projects");
-    assert.equal(projects.status, 200);
+    assert.equal(projects.status, 403);
+    assert.equal(projects.body.error.code, "LAN_ACCESS_DENIED");
     const metadata = await requestFrom(address, port, "/api/meta");
-    assert.equal(metadata.status, 200);
-    assert.equal(metadata.body.capabilities.localAiChat, false);
+    assert.equal(metadata.status, 403);
+    assert.equal(metadata.body.error.code, "LAN_ACCESS_DENIED");
     const ai = await requestFrom(address, port, "/api/local/ai/threads");
     assert.equal(ai.status, 403);
-    assert.equal(ai.body.error.code, "LOCAL_AI_LOOPBACK_REQUIRED");
+    assert.equal(ai.body.error.code, "LAN_ACCESS_DENIED");
   } finally {
     await fixture.close();
   }

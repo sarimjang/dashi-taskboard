@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { createTaskboardServer, resolveServerOptions } from "../server/index.mjs";
+import { createTaskboardServer, resolveHost, resolveServerOptions } from "../server/index.mjs";
 
 const runningApps = [];
 
@@ -27,6 +27,55 @@ async function startServer(configure, listenOptions = {}) {
   const address = await app.listen({ port: 0, ...listenOptions });
   runningApps.push({ app, directory });
   return `http://127.0.0.1:${address.port}`;
+}
+
+// A genuinely non-loopback source address is required to exercise the LAN
+// boundary for real: source determination is based on the actual TCP peer
+// address, so a loopback socket carrying a spoofed Host/Origin header (as the
+// rest of this file's `requestWithHost` helper does) can never simulate it.
+// Connecting to this machine's own private-network interface produces a real
+// non-loopback peer address without needing a second host. Mirrors the same
+// pattern already used in test/ai-chat-server.test.mjs and
+// test/cloud-companion.test.mjs.
+function privateLanAddress() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .find((entry) => {
+      if (entry?.family !== "IPv4" || entry.internal) return false;
+      const [first, second] = entry.address.split(".").map(Number);
+      return first === 10
+        || (first === 172 && second >= 16 && second <= 31)
+        || (first === 192 && second === 168)
+        || (first === 169 && second === 254);
+    })?.address ?? null;
+}
+
+async function startLanServer(configure) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-lan-test-"));
+  const options = configure ? await configure(directory) : {};
+  const app = createTaskboardServer({ dataDirectory: directory, ...options });
+  const address = await app.listen({ host: "0.0.0.0", port: 0 });
+  runningApps.push({ app, directory });
+  return { app, port: address.port };
+}
+
+async function requestFromAddress(address, port, pathname, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  const response = await fetch(`http://${address}:${port}${pathname}`, {
+    ...options,
+    headers,
+    body: options.body === undefined || typeof options.body === "string"
+      ? options.body
+      : JSON.stringify(options.body),
+  });
+  const text = await response.text();
+  return {
+    response,
+    body: text ? JSON.parse(text) : undefined,
+  };
 }
 
 async function request(baseUrl, pathname, options = {}) {
@@ -64,8 +113,8 @@ async function requestWithHost(baseUrl, host, headers = {}) {
   });
 }
 
-async function openEventStream(baseUrl, headers) {
-  const target = new URL("/api/events", baseUrl);
+async function openEventStream(baseUrl, headers, pathname = "/api/events") {
+  const target = new URL(pathname, baseUrl);
   return new Promise((resolve, reject) => {
     const outgoing = httpRequest(target, { headers }, (response) => {
       resolve({ status: response.statusCode });
@@ -420,7 +469,17 @@ test("device workspaces come from this machine's Codex project roots", async () 
   });
 });
 
-test("accepts private LAN requests and rejects public Host and Origin headers", async () => {
+// Formerly "accepts private LAN requests and rejects public Host and Origin
+// headers" (rewritten per loopback-security-baseline task 2.2). The Host/Origin
+// checks below run on a genuinely loopback socket in every case (this file's
+// `request`/`requestWithHost` helpers never leave 127.0.0.1) - they validate
+// DNS-rebinding-style Host/Origin format, a concern independent of, and unaffected
+// by, the LAN access boundary. They are NOT a substitute for real LAN-source
+// testing: a private-network-looking Host header on a loopback connection no
+// longer implies "a LAN client can reach this API" now that source
+// determination is based on the actual TCP peer address. See the dedicated LAN
+// access boundary tests below for that behavior.
+test("Host and Origin header validation accepts private-network-looking values and rejects public ones", async () => {
   const baseUrl = await startServer(undefined, { host: "0.0.0.0" });
 
   const codexOriginResult = await request(baseUrl, "/health", {
@@ -448,6 +507,214 @@ test("accepts private LAN requests and rejects public Host and Origin headers", 
   });
   assert.equal(originResult.response.status, 403);
   assert.equal(originResult.body.error.code, "INVALID_ORIGIN");
+});
+
+test("without the LAN access flag, the server only binds loopback and is unreachable from the LAN", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-noflag-test-"));
+  const app = createTaskboardServer({ dataDirectory: directory });
+  const address = await app.listen({ host: resolveHost(null, "0"), port: 0 });
+  runningApps.push({ app, directory });
+
+  assert.equal(address.address, "127.0.0.1");
+  await assert.rejects(
+    () => requestFromAddress(lanAddress, address.port, "/health"),
+    /ECONNREFUSED|EHOSTUNREACH|fetch failed/,
+  );
+});
+
+test("setting the LAN access flag binds all interfaces and the server becomes reachable from the LAN", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-flag-test-"));
+  const app = createTaskboardServer({ dataDirectory: directory });
+  const host = resolveHost(null, "1");
+  assert.equal(host, "0.0.0.0");
+  const address = await app.listen({ host, port: 0 });
+  runningApps.push({ app, directory });
+
+  const health = await requestFromAddress(lanAddress, address.port, "/health");
+  assert.equal(health.response.status, 200);
+});
+
+test("LAN access requires an instance token: HTTP, SSE, and WebSocket all reject unauthenticated LAN callers", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const { port } = await startLanServer(() => ({
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+  }));
+
+  const httpResult = await requestFromAddress(lanAddress, port, "/api/projects");
+  assert.equal(httpResult.response.status, 403);
+  assert.equal(httpResult.body.error.code, "LAN_ACCESS_DENIED");
+
+  const sseResult = await openEventStream(`http://${lanAddress}:${port}`, {});
+  assert.equal(sseResult.status, 403);
+
+  const wsStatus = await openWebSocket(`ws://${lanAddress}:${port}/api/events`, {});
+  assert.equal(wsStatus, 403);
+});
+
+test("an authenticated LAN client succeeds over HTTP and SSE while an unauthenticated one is still rejected", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const instanceToken = "3b1f7c2a-9e4d-4a8b-9c1a-0f6e2d5b7a44";
+  const instanceSecret = "5a2c8e91-1d3f-4b6a-8e2c-7a4f9d1b6c30-5a2c8e911d3f4b6a";
+  const { port } = await startLanServer(() => ({
+    instanceToken,
+    instanceSecret,
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+  }));
+
+  const unauthenticated = await requestFromAddress(lanAddress, port, "/api/projects");
+  assert.equal(unauthenticated.response.status, 404);
+
+  const authenticatedProjects = await requestFromAddress(
+    lanAddress,
+    port,
+    `/${instanceToken}/api/projects`,
+  );
+  assert.equal(authenticatedProjects.response.status, 200);
+
+  const sseResult = await openEventStream(`http://${lanAddress}:${port}`, {}, `/${instanceToken}/api/events`);
+  assert.equal(sseResult.status, 200);
+});
+
+test("cloud WebSocket upgrades stay loopback-only even for an authenticated LAN client", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-lan-ws-test-"));
+  const upstreamServer = createServer();
+  const upstreamWebSockets = new WebSocketServer({ noServer: true });
+  upstreamServer.on("upgrade", (request, socket, head) => {
+    upstreamWebSockets.handleUpgrade(request, socket, head, () => {});
+  });
+  await new Promise((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
+  const upstreamAddress = upstreamServer.address();
+  const instanceToken = "4d8f2a6c-9b1e-4d7a-8f2c-6b9e1d4a7f80";
+  const instanceSecret = "2b6e9c4a-7d1f-4a8e-9c6b-1e4a7d2f9c50-2b6e9c4a7d1f4a8e";
+  const app = createTaskboardServer({
+    dataDirectory: directory,
+    instanceToken,
+    instanceSecret,
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+    cloudConfigStore: {
+      async read() {
+        return {
+          remoteUrl: `http://127.0.0.1:${upstreamAddress.port}`,
+          actorName: "Test actor",
+          sharedKey: "test-shared-key",
+        };
+      },
+    },
+  });
+  const address = await app.listen({ host: "0.0.0.0", port: 0 });
+
+  try {
+    // No instance-token prefix: hidden behind the same route-prefix bearer
+    // credential as every other route (404, matching the HTTP/SSE behavior).
+    const unauthenticatedStatus = await openWebSocket(
+      `ws://${lanAddress}:${address.port}/api/events`,
+      { host: `${lanAddress}:${address.port}` },
+    );
+    assert.equal(unauthenticatedStatus, 404);
+
+    // LAN+token must not open the cloud-relay WS; HTTP/SSE deny the same caller.
+    const authenticatedLanStatus = await openWebSocket(
+      `ws://${lanAddress}:${address.port}/${instanceToken}/api/events`,
+      { host: `${lanAddress}:${address.port}` },
+    );
+    assert.equal(authenticatedLanStatus, 403);
+
+    // Loopback with the same token still succeeds.
+    const authenticatedLoopbackStatus = await openWebSocket(
+      `ws://127.0.0.1:${address.port}/${instanceToken}/api/events`,
+      { host: `127.0.0.1:${address.port}` },
+    );
+    assert.equal(authenticatedLoopbackStatus, 101);
+  } finally {
+    await app.close();
+    upstreamWebSockets.close();
+    await new Promise((resolve) => upstreamServer.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("machine-level metadata and capability routes stay loopback-only even for an authenticated LAN client", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const instanceToken = "8d4a1f6e-2b7c-4e9a-8d1f-6c3a9e5b7d21";
+  const instanceSecret = "1c9e4b7a-3d6f-4a8c-9e1b-5d7a2c4f8e60-1c9e4b7a3d6f4a8c";
+  const { port } = await startLanServer(() => ({
+    instanceToken,
+    instanceSecret,
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+  }));
+
+  const metadataResult = await requestFromAddress(lanAddress, port, `/${instanceToken}/api/meta`);
+  assert.equal(metadataResult.response.status, 403);
+  assert.equal(metadataResult.body.error.code, "LOCAL_ONLY");
+
+  const loopbackResult = await request(`http://127.0.0.1:${port}`, `/${instanceToken}/api/meta`);
+  assert.equal(loopbackResult.response.status, 200);
+});
+
+test("actor identity headers are trusted only from loopback callers, even after LAN authentication", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const instanceToken = "2f6a9c4e-7b1d-4f8a-9c6e-3a5d7f1b9c40";
+  const instanceSecret = "7e3b9c1a-4d6f-4b8e-9a2c-5f7d1b3e9c80-7e3b9c1a4d6f4b8e";
+  const { port } = await startLanServer(() => ({
+    instanceToken,
+    instanceSecret,
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+  }));
+
+  const spoofedHeaders = {
+    "x-taskboard-user-id": "spoofed-lan-user",
+    "x-taskboard-user-name": "Spoofed%20LAN%20User",
+  };
+
+  const lanResult = await requestFromAddress(lanAddress, port, `/${instanceToken}/api/tasks`, {
+    method: "POST",
+    headers: spoofedHeaders,
+    body: { title: "Created from an authenticated LAN client" },
+  });
+  assert.equal(lanResult.response.status, 201);
+  assert.equal(lanResult.body.task.creatorType, "user");
+  assert.equal(lanResult.body.task.creatorId, "local-user");
+  assert.equal(lanResult.body.task.creatorName, "本地用户");
+
+  const loopbackResult = await request(`http://127.0.0.1:${port}`, `/${instanceToken}/api/tasks`, {
+    method: "POST",
+    headers: spoofedHeaders,
+    body: { title: "Created from loopback" },
+  });
+  assert.equal(loopbackResult.response.status, 201);
+  assert.equal(loopbackResult.body.task.creatorId, "spoofed-lan-user");
+  assert.equal(loopbackResult.body.task.creatorName, "Spoofed LAN User");
 });
 
 test("trusted HTTPS origins allow a loopback reverse tunnel for HTTP and SSE only", async () => {
@@ -631,6 +898,28 @@ test("trusted origin configuration rejects non-origin URLs", () => {
       /CODEX_TASKBOARD_TRUSTED_ORIGINS/,
     );
   }
+});
+
+test("resolveHost only ever returns loopback unless the LAN access flag is explicitly \"1\"", () => {
+  assert.equal(resolveHost(null, null), "127.0.0.1");
+  assert.equal(resolveHost(null, "0"), "127.0.0.1");
+  assert.equal(resolveHost(null, "true"), "127.0.0.1");
+
+  // A stale CODEX_TASKBOARD_HOST=0.0.0.0 left over from before this flag existed
+  // must fall back to the safe default rather than erroring out, so any startup
+  // path still carrying it becomes loopback-only automatically.
+  assert.equal(resolveHost("0.0.0.0", null), "127.0.0.1");
+
+  assert.equal(resolveHost(null, "1"), "0.0.0.0");
+  assert.equal(resolveHost("127.0.0.1", "1"), "127.0.0.1");
+  assert.equal(resolveHost("0.0.0.0", "1"), "0.0.0.0");
+  assert.throws(() => resolveHost("some-host", "1"), /CODEX_TASKBOARD_HOST/);
+});
+
+test("resolveServerOptions only reports LAN access enabled for an explicit \"1\"", () => {
+  assert.equal(resolveServerOptions({ processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: undefined } }).lanAccessEnabled, false);
+  assert.equal(resolveServerOptions({ processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "0" } }).lanAccessEnabled, false);
+  assert.equal(resolveServerOptions({ processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" } }).lanAccessEnabled, true);
 });
 
 test("project and task CRUD flow", async () => {
@@ -1694,21 +1983,37 @@ test("request boundaries reject unknown fields and invalid values", async () => 
   assert.equal(invalidWorktree.body.error.code, "INVALID_FIELD");
 });
 
-test("task changes from one LAN client are broadcast to another client", async () => {
-  const baseUrl = await startServer(undefined, { host: "0.0.0.0" });
-  const lanHeaders = {
-    host: "192.168.1.24:47823",
-    origin: "http://192.168.1.24:47823",
-  };
-  const eventResponse = await fetch(`${baseUrl}/api/events`, { headers: lanHeaders });
+// Rewritten per loopback-security-baseline task 2.3. The previous version only
+// ever connected via a loopback socket and spoofed a private-looking Host/Origin
+// header to stand in for "a LAN client" - under the new source-of-truth (the
+// real TCP peer address), that no longer exercises LAN behavior at all. This
+// version uses a genuine non-loopback source address, authenticated via the LAN
+// access flag + instance token, and confirms realtime broadcast works
+// end-to-end for such a client exactly as it does for a loopback one.
+test("task changes from an authenticated LAN client are broadcast over its SSE subscription", async (t) => {
+  const lanAddress = privateLanAddress();
+  if (!lanAddress) {
+    t.skip("No private LAN interface is available");
+    return;
+  }
+  const instanceToken = "6c2e8a4d-1f7b-4c9e-8a2d-4f6b1e8c9a70";
+  const instanceSecret = "9f4a2c6e-8b1d-4e7a-9c2f-6a8d1b4e7c90-9f4a2c6e8b1d4e7a";
+  const { port } = await startLanServer(() => ({
+    instanceToken,
+    instanceSecret,
+    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
+  }));
+  const lanBaseUrl = `http://${lanAddress}:${port}`;
+  const routePrefix = `/${instanceToken}`;
+
+  const eventResponse = await fetch(`${lanBaseUrl}${routePrefix}/api/events`);
   assert.equal(eventResponse.status, 200);
   const reader = eventResponse.body.getReader();
   const decoder = new TextDecoder();
   await reader.read();
 
-  const createResult = await request(baseUrl, "/api/tasks", {
+  const createResult = await requestFromAddress(lanAddress, port, `${routePrefix}/api/tasks`, {
     method: "POST",
-    headers: lanHeaders,
     body: { title: "Broadcast me" },
   });
   assert.equal(createResult.response.status, 201);
@@ -1725,9 +2030,11 @@ test("task changes from one LAN client are broadcast to another client", async (
   assert.equal(event.type, "task.created");
   assert.equal(event.task.id, createResult.body.task.id);
 
-  const listResult = await request(baseUrl, "/api/tasks?projectId=local", {
-    headers: lanHeaders,
-  });
+  const listResult = await requestFromAddress(
+    lanAddress,
+    port,
+    `${routePrefix}/api/tasks?projectId=local`,
+  );
   assert.equal(listResult.response.status, 200);
   assert.equal(listResult.body.tasks.some((task) => task.id === createResult.body.task.id), true);
   await reader.cancel();

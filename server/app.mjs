@@ -313,6 +313,32 @@ function assertAiLoopbackRequest(request) {
   }
 }
 
+// Source determination MUST be based on the actual connection-layer peer address
+// (request.socket.remoteAddress), never on a caller-suppliable header, or a LAN
+// caller could forge loopback identity. See design.md Risks/Trade-offs.
+function isLoopbackRequest(request) {
+  return isLoopbackAddress(request.socket.remoteAddress);
+}
+
+function isLanAccessEnabled(value) {
+  return String(value ?? "").trim() === "1";
+}
+
+// Single shared authorization gate for HTTP, SSE, and WebSocket connection
+// establishment. LAN opt-in alone does not grant access: the caller must also
+// already have proven knowledge of the configured instance token (the existing
+// route-prefix bearer credential), reusing the repo's existing auth primitive
+// instead of introducing a new one.
+function assertConnectionAuthorized(request, resolved) {
+  if (isLoopbackRequest(request)) return;
+  if (resolved.lanAccessEnabled && resolved.instanceToken) return;
+  throw new ApiError(
+    403,
+    "LAN_ACCESS_DENIED",
+    "This server is not configured to accept authenticated requests from this network",
+  );
+}
+
 function stringField(value, name, { required = false, nullable = false, maxLength }) {
   if (value === undefined) {
     if (required) {
@@ -559,6 +585,10 @@ function requestHeader(request, name) {
 function actorFromRequest(request) {
   if (request.headers["x-taskboard-client"] === "taskctl") {
     return CODEX_AGENT_ACTOR;
+  }
+
+  if (!isLoopbackRequest(request)) {
+    return { type: "user", id: "local-user", name: "本地用户", avatarUrl: null };
   }
 
   const rawId = requestHeader(request, "x-taskboard-user-id");
@@ -1623,6 +1653,7 @@ export function resolveServerOptions(options = {}) {
     instanceToken,
     instanceSecret,
     trustedOrigins: parseTrustedOrigins(environment[TRUSTED_ORIGINS_ENV]),
+    lanAccessEnabled: isLanAccessEnabled(environment.CODEX_TASKBOARD_ALLOW_LAN),
     version: String(
       options.version ?? environment.CODEX_TASKBOARD_VERSION ?? "development",
     ).trim(),
@@ -1637,8 +1668,16 @@ export function resolvePort(value = process.env.CODEX_TASKBOARD_PORT ?? "47823")
   return port;
 }
 
-export function resolveHost(value = process.env.CODEX_TASKBOARD_HOST ?? "0.0.0.0") {
-  const host = String(value).trim();
+// LAN reachability is opt-in: unless CODEX_TASKBOARD_ALLOW_LAN is explicitly set,
+// resolveHost can only ever return the loopback address, so any startup path that
+// still carries an old CODEX_TASKBOARD_HOST=0.0.0.0 override falls back to the
+// safe default instead of erroring out. See design.md "預設綁定改為 loopback-only".
+export function resolveHost(
+  value = process.env.CODEX_TASKBOARD_HOST,
+  allowLan = process.env.CODEX_TASKBOARD_ALLOW_LAN,
+) {
+  if (!isLanAccessEnabled(allowLan)) return "127.0.0.1";
+  const host = String(value ?? "0.0.0.0").trim();
   if (host !== "127.0.0.1" && host !== "0.0.0.0") {
     throw new Error("CODEX_TASKBOARD_HOST must be 127.0.0.1 or 0.0.0.0");
   }
@@ -1991,6 +2030,14 @@ export function createTaskboardServer(options = {}) {
         Boolean(resolved.instanceToken),
         resolved.trustedOrigins,
       );
+      // /health is exempt: it never carries the instance-token route prefix (a
+      // caller must be able to probe/verify service identity before it can know
+      // whether it is even talking to its own launched instance), and it discloses
+      // nothing beyond version plus an HMAC proof that is meaningless without the
+      // secret. Every other route requires loopback OR authenticated LAN access.
+      if (incomingUrl.pathname !== "/health") {
+        assertConnectionAuthorized(request, resolved);
+      }
       const origin = request.headers.origin;
       const trustedEmbedOrigin = TRUSTED_EMBED_ORIGINS.has(origin)
         || (Boolean(resolved.instanceToken) && origin === "null");
@@ -2047,10 +2094,12 @@ export function createTaskboardServer(options = {}) {
       const isMachineCapabilityRoute = pathname === "/api/meta"
         || pathname === "/api/device-workspaces"
         || isDevelopmentContextsRoute;
+      // Machine-level metadata/capability routes stay loopback-only unconditionally,
+      // independent of the LAN flag, LAN authentication, or cloud mode. No exception.
+      if (isMachineCapabilityRoute) assertLoopbackRequest(request);
       const capabilityCloudConfig = isMachineCapabilityRoute
         ? await cloudConfig.read()
         : null;
-      if (capabilityCloudConfig?.remoteUrl) assertLoopbackRequest(request);
 
       if (pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);

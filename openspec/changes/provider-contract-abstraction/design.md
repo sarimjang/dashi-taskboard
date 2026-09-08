@@ -34,7 +34,7 @@ architect.md 原始的 `ProviderCapabilities` 是給「provider 本身」的能�
 
 ### provider registry 用 `source` 字串做 key，registry 本身不對外暴露 `source` 字面比對
 
-`server/database.mjs` 讀出的 `row.external_source`（資料庫既有欄位值，如 `"jira"`）當作 registry 的查表 key，不改變資料庫欄位本身的字面值（維持向後相容，change 2 已確立的 schema 不變原則）。新增 `server/provider-registry.mjs`，匯出 `getProviderCapabilities(source: string | null): ProviderCapabilities`（`source` 為 `null` 或未註冊值時回傳 local-only 的預設能力：全部 mutation 能力為 `true`，因為本機 task 什麼都能改）與 `getProvider(source: string): IssueProvider | null`。呼叫端（`app.mjs`/`database.mjs`/前端）一律透過這兩個函式查詢，不再自行字面比對。
+`server/database.mjs` 讀出的 `row.external_source`（資料庫既有欄位值，如 `"jira"`）當作 registry 的查表 key，不改變資料庫欄位本身的字面值（維持向後相容，change 2 已確立的 schema 不變原則）。新增 `server/provider-registry.mjs`，匯出 `getProviderCapabilities(source: string | null): ProviderCapabilities`（`source` 為 `null` 或未註冊值時回傳 local-only 的預設能力：全部 mutation 能力為 `true`，因為本機 task 什麼都能改）與 `getProvider(source: string): RegisteredProvider | null`（`RegisteredProvider` 為 `provider-registry.mjs` 自身 JSDoc 定義的型別，目前僅含 `capabilities` 欄位；本段先前誤寫為 `IssueProvider | null`，經 §2 獨立審查 pca-group2-review 發現此型別簽章與 §1 起的實際實作不符而訂正——純文件修正，非行為變更）。呼叫端（`app.mjs`/`database.mjs`/前端）一律透過這兩個函式查詢，不再自行字面比對。
 
 > **§1 執行後校正（獨立審查 pca-group1-review 發現，非阻斷，PM 已拍板）**：本段文字「全部 mutation 能力為 `true`」逐字所指的是下段新增的 5 個 task-mutation 位元（`manualArchive`/`manualDelete`/`manualMove`/`assigneeEdit`/`projectReassign`），未明確規定 `webhook`/`incrementalSync`（provider 整體同步機制宣告）與 `comments`/`attachments`/`relations`（三值列舉）這 5 個欄位的 local 預設值。§1 實作採用「所有欄位一律取值域最大值」（9 個 boolean 皆 `true`、3 個列舉皆 `"read-write"`）作為合理外推，已獨立審查確認無反例、且本輪尚未有任何 consumer 讀取這些欄位（零行為影響半徑）。PM 決定：**維持此實作，作為本 change 對 local 預設值的正式定義**，不要求 §1 返工。§2/§3 的 apply-executor 開始消費這些欄位時，以此為準，不需重新拍板。
 

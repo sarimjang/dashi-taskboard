@@ -25,9 +25,9 @@
 
 ## 5. 前端改讀 capabilities
 
-- [ ] 5.1 `web/src/App.tsx` 的 `isJiraProject` 判斷改為讀取 `selectedProject?.capabilities`（依實際受影響的 UI 行為決定讀取哪個/哪些欄位，例如專案層級的 `projectReassign` 或既有等效欄位），移除字面比對 `selectedProject?.source === "jira"`——落實設計決策「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」，前端不重複維護 source-to-capabilities 的映射邏輯。驗證：該檔案內 grep `source === "jira"` 結果為零。
-- [ ] 5.2 `web/src/components/TaskCard.tsx` 兩處 `disabled={propertyDisabled || task.source === "jira"}` 改為讀取對應的 `task.capabilities`（如 `assigneeEdit`），`web/src/components/IssueListView.tsx` 一處、`web/src/components/TaskDetail.tsx` 兩處（含 `onDeleteLabel` 三元判斷）比照辦理，同樣落實「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」。驗證：既有涵蓋這些元件 disabled 狀態的元件測試（`test:components`）通過，且對這四個檔案 grep `source === "jira"` 結果為零。
-- [ ] 5.3 [P] 執行 `npm run typecheck`（若存在）與 `npm run build:web`，確認型別與建置皆乾淨。
+- [x] 5.1 `web/src/App.tsx` 的 `isJiraProject` 判斷改為讀取 `selectedProject?.capabilities`（依實際受影響的 UI 行為決定讀取哪個/哪些欄位，例如專案層級的 `projectReassign` 或既有等效欄位），移除字面比對 `selectedProject?.source === "jira"`——落實設計決策「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」，前端不重複維護 source-to-capabilities 的映射邏輯。驗證：該檔案內 grep `source === "jira"` 結果為零。
+- [x] 5.2 `web/src/components/TaskCard.tsx` 兩處 `disabled={propertyDisabled || task.source === "jira"}` 改為讀取對應的 `task.capabilities`（如 `assigneeEdit`），`web/src/components/IssueListView.tsx` 一處、`web/src/components/TaskDetail.tsx` 兩處（含 `onDeleteLabel` 三元判斷）比照辦理，同樣落實「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」。驗證：既有涵蓋這些元件 disabled 狀態的元件測試（`test:components`）通過，且對這四個檔案 grep `source === "jira"` 結果為零。
+- [x] 5.3 [P] 執行 `npm run typecheck`（若存在）與 `npm run build:web`，確認型別與建置皆乾淨。
 
 ## 6. 假 provider 驗收測試與收尾
 

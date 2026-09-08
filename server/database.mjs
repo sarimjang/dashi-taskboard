@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { DEFAULT_LABEL_NAMES, JIRA_PROJECT_ID } from "../shared/domain.mjs";
+import { getProviderCapabilities } from "./provider-registry.mjs";
 
 const DEFAULT_PROJECT_LABELS_JSON = JSON.stringify(DEFAULT_LABEL_NAMES);
 const TASK_TREE_MAX_NODES = 1_000;
@@ -231,6 +232,7 @@ function taskFromRow(row) {
     : row.git_branch
       ? { type: "branch", branch: row.git_branch }
       : null;
+  const source = row.external_source === "jira" ? "jira" : "local";
   return {
     id: row.id,
     identifier: row.identifier,
@@ -260,7 +262,8 @@ function taskFromRow(row) {
     recurrence: row.recurrence_interval && row.recurrence_unit
       ? { interval: row.recurrence_interval, unit: row.recurrence_unit }
       : null,
-    source: row.external_source === "jira" ? "jira" : "local",
+    source,
+    capabilities: getProviderCapabilities(source),
     externalOrigin: row.external_origin ?? null,
     externalKey: row.external_key ?? null,
     externalUrl: row.external_url ?? null,
@@ -343,11 +346,13 @@ function attachmentFromRow(row) {
 }
 
 function projectFromRow(row) {
+  const source = row.id === JIRA_PROJECT_ID ? "jira" : "local";
   return {
     id: row.id,
     name: row.name,
     workspacePath: row.workspace_path,
-    source: row.id === JIRA_PROJECT_ID ? "jira" : "local",
+    source,
+    capabilities: getProviderCapabilities(source),
     labels: JSON.parse(row.labels),
     issueCount: Number(row.issue_count ?? 0),
     createdAt: row.created_at,

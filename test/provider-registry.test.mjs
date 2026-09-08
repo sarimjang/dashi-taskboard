@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { createJiraIntegration } from "../server/jira-integration.mjs";
 import { getProvider, getProviderCapabilities, registerProvider } from "../server/provider-registry.mjs";
 
 const LOCAL_DEFAULT_CAPABILITIES = {
@@ -34,9 +35,16 @@ test("getProvider returns null for an unregistered source string", () => {
   assert.equal(getProvider("unregistered-test-source"), null);
 });
 
-test("getProviderCapabilities(\"jira\") falls into the unregistered branch this round (no provider registered yet)", () => {
-  assert.deepEqual(getProviderCapabilities("jira"), LOCAL_DEFAULT_CAPABILITIES);
-  assert.equal(getProvider("jira"), null);
+test("getProviderCapabilities(\"jira\") matches createJiraIntegration(...).capabilities (pca-group2, §2.2)", () => {
+  const jira = createJiraIntegration({});
+  assert.deepEqual(getProviderCapabilities("jira"), jira.capabilities);
+  assert.notDeepEqual(getProviderCapabilities("jira"), LOCAL_DEFAULT_CAPABILITIES);
+});
+
+test("getProvider(\"jira\") returns the registered provider (not null, not the live createJiraIntegration instance)", () => {
+  const registered = getProvider("jira");
+  assert.notEqual(registered, null);
+  assert.deepEqual(Object.keys(registered), ["capabilities"]);
 });
 
 test("getProviderCapabilities and getProvider return the registered provider's own values for a registered source", () => {

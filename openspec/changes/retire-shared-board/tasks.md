@@ -1,15 +1,15 @@
 ## 1. 範圍核實（Investigation）
 
-- [ ] 1.1 逐一追蹤 `web/src/App.tsx`、`web/src/api.ts`、`web/src/taskConversations.ts`、`web/src/types.ts`、`web/src/components/TaskEditor.tsx`、`server/ai-chat*.mjs`、`server/codex-app-server.mjs`、`server/database.mjs`、`server/project-summary.mjs`、`scripts/codex-injector*.mjs`、`shared/taskboard-automation.mjs` 裡出現的 `workspacePath`/`codexHostId`/`codexProjectId` 呼叫鏈，確認是否真的呼叫 `server/cloud-proxy.mjs`/`server/cloud-config.mjs` 的雲端轉發邏輯（即設計文件「刪除而非修復雲端寫入路徑」決策範圍內的耦合檔案），產出一份確認清單——驗證方式：清單存在，且每個檔案都有明確結論（耦合／不耦合／需要進一步任務）
-- [ ] 1.2 [P] 確認 fork-plan.md 提到的「execution overlay」在 UI 原始碼中具體對應哪個功能或元件，記錄結論——驗證方式：在備註中補上找到的對應功能名稱與檔案位置，或明確記錄「未找到對應功能，維持只保護 resolveDevelopmentContext/resolveProjectWorkspace」的結論
+- [x] 1.1 逐一追蹤 `web/src/App.tsx`、`web/src/api.ts`、`web/src/taskConversations.ts`、`web/src/types.ts`、`web/src/components/TaskEditor.tsx`、`server/ai-chat*.mjs`、`server/codex-app-server.mjs`、`server/database.mjs`、`server/project-summary.mjs`、`scripts/codex-injector*.mjs`、`shared/taskboard-automation.mjs` 裡出現的 `workspacePath`/`codexHostId`/`codexProjectId` 呼叫鏈，確認是否真的呼叫 `server/cloud-proxy.mjs`/`server/cloud-config.mjs` 的雲端轉發邏輯（即設計文件「刪除而非修復雲端寫入路徑」決策範圍內的耦合檔案），產出一份確認清單——驗證方式：清單存在，且每個檔案都有明確結論（耦合／不耦合／需要進一步任務）
+- [x] 1.2 [P] 確認 fork-plan.md 提到的「execution overlay」在 UI 原始碼中具體對應哪個功能或元件，記錄結論——驗證方式：在備註中補上找到的對應功能名稱與檔案位置，或明確記錄「未找到對應功能，維持只保護 resolveDevelopmentContext/resolveProjectWorkspace」的結論
 
 ## 2. Shared-board-migration 遷移子指令
 
-- [ ] 2.1 在 `cli/taskctl.mjs` 新增遷移子指令，讀取 `cloud-companion.json` 設定並列出來源雲端看板的 tasks/comments/attachments 清單（dry-run，僅列出不寫入）——驗證方式：對一個測試用雲端看板執行 dry-run，輸出清單筆數與雲端資料庫直接查詢的筆數一致，對應 spec 需求「Migrate shared cloud board data to a local project」
-- [ ] 2.2 實作遷移子指令的實際寫入邏輯，將 tasks/comments/attachments 匯入指定 local project 的本機資料庫（設計文件「遷移路徑從零建立，不重用既有 CLI 匯出/匯入機制」決策的具體實作）——驗證方式：對測試用雲端看板快照執行完整遷移，比對 local project 資料庫筆數與內容雜湊跟來源一致，符合 spec 的 Successful full migration 情境
-- [ ] 2.3 [P] 讓遷移子指令具備冪等性：重複執行不會對已遷移項目建立重複記錄——驗證方式：對同一來源與目的地連續執行遷移子指令兩次，第二次執行後本機資料庫筆數與第一次相同，符合 spec 的 Re-running migration after a partial success 情境
-- [ ] 2.4 [P] 讓遷移子指令在部分項目失敗時（如附件下載失敗）繼續處理其餘項目並印出明確的失敗清單——驗證方式：模擬一個附件下載失敗的情境，執行後確認其餘項目仍完成遷移且終端機輸出包含該失敗項目與原因，符合 spec 的 Migration failure on a subset of items 情境
-- [ ] 2.5 對遷移子指令的資料完整性做獨立驗證（筆數比對、內容雜湊比對），不僅限一般單元測試——驗證方式：獨立 code-reviewer 對 2.1~2.4 的實作額外執行一次筆數與雜湊比對，並在 review handoff 中記錄比對結果
+- [x] 2.1 在 `cli/taskctl.mjs` 新增遷移子指令，讀取 `cloud-companion.json` 設定並列出來源雲端看板的 tasks/comments/attachments 清單（dry-run，僅列出不寫入）——驗證方式：對一個測試用雲端看板執行 dry-run，輸出清單筆數與雲端資料庫直接查詢的筆數一致，對應 spec 需求「Migrate shared cloud board data to a local project」
+- [x] 2.2 實作遷移子指令的實際寫入邏輯，將 tasks/comments/attachments 匯入指定 local project 的本機資料庫（設計文件「遷移路徑從零建立，不重用既有 CLI 匯出/匯入機制」決策的具體實作）——驗證方式：對測試用雲端看板快照執行完整遷移，比對 local project 資料庫筆數與內容雜湊跟來源一致，符合 spec 的 Successful full migration 情境
+- [x] 2.3 [P] 讓遷移子指令具備冪等性：重複執行不會對已遷移項目建立重複記錄——驗證方式：對同一來源與目的地連續執行遷移子指令兩次，第二次執行後本機資料庫筆數與第一次相同，符合 spec 的 Re-running migration after a partial success 情境
+- [x] 2.4 [P] 讓遷移子指令在部分項目失敗時（如附件下載失敗）繼續處理其餘項目並印出明確的失敗清單——驗證方式：模擬一個附件下載失敗的情境，執行後確認其餘項目仍完成遷移且終端機輸出包含該失敗項目與原因，符合 spec 的 Migration failure on a subset of items 情境
+- [x] 2.5 對遷移子指令的資料完整性做獨立驗證（筆數比對、內容雜湊比對），不僅限一般單元測試——驗證方式：獨立 code-reviewer 對 2.1~2.4 的實作額外執行一次筆數與雜湊比對，並在 review handoff 中記錄比對結果
 
 ## 3. 移除雲端寫入路徑（僅在第 2 節任務全數驗證通過後才可開始）
 

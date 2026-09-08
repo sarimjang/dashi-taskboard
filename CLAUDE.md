@@ -115,3 +115,16 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+## Herdr Resident-PM Orchestration (bootstrapped 2026-09-08)
+
+This repo runs the herdr skill's resident-PM orchestration workflow (`~/.claude/skills/herdr/`), `software-engineering` domain pack. Facts a repo-native session (no skill load) needs to discover this without re-reading the skill:
+
+- **Evidence branch**: orphan branch `agents/evidence`, mounted as a git worktree at `.spectra/blackboard/` (sibling to the worktree root, not inside any Spectra change worktree). `memory/` is the only tier committed to that branch; `board.json`, `orchestrator/`, `pm/`, `changes/`, `deliverables/`, `requests/`, `templates/` are gitignored working state (blackboard's own `.spectra/blackboard/.gitignore`).
+- **Push allowlist / remote**: no push-relay hook installed yet (evidence-branch-bootstrap.md §2 is optional and was deferred at bootstrap time — commits on `agents/evidence` are local-only until that hook is added). `origin` is `https://github.com/sarimjang/dashi-taskboard.git`; `upstream` (read-only) is `https://github.com/chuspeeism/dashi-taskboard.git`.
+- **`core.hooksPath`**: already redirected to `.beads/hooks` by beads. Any future push-relay hook install must target that directory, not `.git/hooks`.
+- **Canonical test command**: `npm ci && npm test` (see Build & Test above); `npm run test:cloud` for the miniflare-backed cloud worker suite.
+- **Pane layout**: not yet established — no orchestrator/PM pane has been spawned as of bootstrap. Follow `references/pane-layout.md` (3-pane main console: orchestrator/pm-board/watchdog; per-change quad tabs) when panes are opened.
+- **Resident PM identity**: agent name `dashi-taskboard-pm` (project slug `dashi-taskboard` per B3 naming: `<project-slug>-pm`).
+- **Session-init manifest (recorded)**: resident-pm → `{kind: claude, model: sonnet, permission_mode: bypassPermissions}`. See `.spectra/blackboard/orchestrator/decisions.jsonl` for the actual `decision: manifest` record — this file only summarizes it for discoverability, the JSONL record is the source of truth.
+- **Open judgment call (not explicit in `pm-blackboard-contract.md` B2)**: `requests/` was placed in the gitignored tier, grouped with `pm/`/`changes/`/`deliverables/` per B3's ownership language, since B2's committed/gitignored split does not mention it explicitly either way. Flagged to the skill's feedback inbox as a doc gap.

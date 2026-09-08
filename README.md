@@ -178,15 +178,18 @@ To use a different UI origin, set `window.__CODEX_TASKBOARD_URL__` before the us
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_TASKBOARD_HOST` | `0.0.0.0` | HTTP bind address; use `127.0.0.1` to disable LAN access |
+| `CODEX_TASKBOARD_HOST` | `127.0.0.1` | HTTP bind address; set to `0.0.0.0` together with `CODEX_TASKBOARD_ALLOW_LAN=1` to enable LAN access |
+| `CODEX_TASKBOARD_ALLOW_LAN` | unset | Explicit opt-in required for LAN reachability; without it the server only binds loopback regardless of `CODEX_TASKBOARD_HOST` |
 | `CODEX_TASKBOARD_PORT` | `47823` | Local HTTP port |
 | `CODEX_TASKBOARD_TRUSTED_ORIGINS` | unset | Comma-separated exact HTTPS origins allowed through a loopback reverse tunnel |
 | `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite data directory |
 | `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | CLI API origin |
 
-`npm start` prints both the local URL and the available LAN URLs. Teammates on the same trusted network can open one of those LAN URLs and use the same taskboard service. Task, comment, and attachment changes are broadcast to every open client through server-sent events; reconnecting clients perform a full refresh so changes made while disconnected are not missed. A teammate using `taskctl` can point it at the shared service with `CODEX_TASKBOARD_URL=http://<host-ip>:47823`.
+**Breaking change:** the server used to default to binding all interfaces (`0.0.0.0`), making it LAN-reachable with no account authentication out of the box. That default has changed to loopback-only. If you relied on LAN access, set `CODEX_TASKBOARD_ALLOW_LAN=1` (and keep `CODEX_TASKBOARD_HOST=0.0.0.0`) to restore it — LAN callers must also present the server's instance token (`CODEX_TASKBOARD_INSTANCE_TOKEN`, via the token-prefixed route) to authenticate; HTTP, SSE, and WebSocket connections all enforce the same check. Machine-level metadata and capability routes remain loopback-only even with LAN access enabled. An old startup script or env file that only sets `CODEX_TASKBOARD_HOST=0.0.0.0` (without the new flag) now falls back to loopback-only rather than reopening LAN access silently.
 
-LAN mode has no account authentication: anyone on the trusted local network who can reach the URL can read and write the taskboard. Public internet and cloud deployment require an authenticated deployment boundary.
+`npm start` prints both the local URL and the available LAN URLs when LAN access is enabled. Teammates on the same trusted network can open one of those LAN URLs and use the same taskboard service once they have the instance token. Task, comment, and attachment changes are broadcast to every open client through server-sent events; reconnecting clients perform a full refresh so changes made while disconnected are not missed. A teammate using `taskctl` can point it at the shared service with `CODEX_TASKBOARD_URL=http://<host-ip>:47823`.
+
+LAN mode requires the instance token for every connection type (HTTP, SSE, WebSocket); anyone who does not have it cannot read or write the taskboard even when the flag is enabled. Public internet and cloud deployment still require an authenticated deployment boundary on top of this.
 
 For a reverse tunnel that connects to the local listener, set `CODEX_TASKBOARD_TRUSTED_ORIGINS` to the tunnel's public HTTPS origin, for example `https://board.example.test`. Multiple origins are comma-separated. The variable cannot be empty, and duplicate origins (including normalized forms such as a trailing slash or default HTTPS port) are rejected at startup. Entries must otherwise be exact HTTPS origins; paths, queries, fragments, credentials, and wildcards are rejected. A reverse proxy or tunnel must preserve a loopback socket connection, rewrite `Host` to a local/private host, preserve any `Origin` supplied by the browser, and add that exact public HTTPS origin only when the header is absent, including for `GET` and `HEAD`; forwarded headers are not used for this decision. Configured trusted origins can use ordinary Taskboard HTTP and realtime endpoints, but device-local capability routes remain unavailable even though the tunnel socket is loopback. Requests from direct local or private-LAN origins keep their existing behavior.
 

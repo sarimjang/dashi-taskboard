@@ -593,7 +593,7 @@ test("an authenticated LAN client succeeds over HTTP and SSE while an unauthenti
   assert.equal(sseResult.status, 200);
 });
 
-test("an authenticated LAN client's WebSocket upgrade succeeds through the same shared gate as HTTP and SSE", async (t) => {
+test("cloud WebSocket upgrades stay loopback-only even for an authenticated LAN client", async (t) => {
   const lanAddress = privateLanAddress();
   if (!lanAddress) {
     t.skip("No private LAN interface is available");
@@ -635,11 +635,19 @@ test("an authenticated LAN client's WebSocket upgrade succeeds through the same 
     );
     assert.equal(unauthenticatedStatus, 404);
 
-    const authenticatedStatus = await openWebSocket(
+    // LAN+token must not open the cloud-relay WS; HTTP/SSE deny the same caller.
+    const authenticatedLanStatus = await openWebSocket(
       `ws://${lanAddress}:${address.port}/${instanceToken}/api/events`,
       { host: `${lanAddress}:${address.port}` },
     );
-    assert.equal(authenticatedStatus, 101);
+    assert.equal(authenticatedLanStatus, 403);
+
+    // Loopback with the same token still succeeds.
+    const authenticatedLoopbackStatus = await openWebSocket(
+      `ws://127.0.0.1:${address.port}/${instanceToken}/api/events`,
+      { host: `127.0.0.1:${address.port}` },
+    );
+    assert.equal(authenticatedLoopbackStatus, 101);
   } finally {
     await app.close();
     upstreamWebSockets.close();

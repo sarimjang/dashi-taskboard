@@ -3331,7 +3331,7 @@ export function createTaskboardServer(options = {}) {
         rejectWebSocketUpgrade(socket, 404, "Not Found");
         return;
       }
-      assertConnectionAuthorized(request, resolved);
+      assertLoopbackRequest(request);
       const target = await cloudProxy.webSocketTarget("/api/events");
       remoteSocket = new WebSocketClient(target.url, { headers: target.headers });
       const pendingMessages = [];

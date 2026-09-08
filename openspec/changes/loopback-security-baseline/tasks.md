@@ -5,7 +5,7 @@
 
 ## 2. HTTP、SSE、WebSocket 三種連線方式共用同一個驗證閘門
 
-- [x] 2.1 建立一個單一的驗證判斷點，HTTP 路由、SSE 訂閱建立、WebSocket upgrade handshake 三者在建立連線的最早時機都呼叫它；驗證方式：新增自動化測試對應 spec Requirement「Uniform authentication across connection types under LAN access」的四個情境（未驗證的 HTTP、SSE、WebSocket 個別被拒絕，已驗證的三者皆成功）。
+- [x] 2.1 建立一個單一的驗證判斷點，HTTP 路由、SSE 訂閱建立、WebSocket upgrade handshake 三者在建立連線的最早時機都呼叫它；驗證方式：新增自動化測試對應 spec Requirement「Uniform authentication across connection types under LAN access」的四個情境（未驗證的 HTTP、SSE、WebSocket 個別被拒絕，已驗證的三者皆成功）。**註（lsb-review 修復後補註）**：WebSocket upgrade（`/api/events`）在 cloud 模式下本質是 cloud-relay 專用端點，既有 HTTP/SSE 邏輯對此路徑無條件要求 loopback-only；本 repo 目前沒有非 cloud 用途的 WS 端點，因此 LAN+token 放寬情境不適用於 WS upgrade——WS upgrade 維持無條件 `assertLoopbackRequest`，「已驗證的三者皆成功」僅適用於 HTTP 與 SSE。
 - [x] 2.2 改寫既有測試「accepts private LAN requests and rejects public Host and Origin headers」（一般 API 對 LAN client 可用），使其反映「未開啟旗標時 LAN 不可達、開啟後需通過驗證」的新行為；驗證方式：改寫後的測試案例執行通過。
 - [x] 2.3 改寫既有測試「task changes from one LAN client are broadcast to another client」（LAN client 間廣播任務變更），使其反映相同的新驗證要求；驗證方式：改寫後的測試案例執行通過。
 

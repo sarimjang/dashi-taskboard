@@ -7,6 +7,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import {
+  collectCloudSnapshot,
+  commentContentDigest,
+  createCloudReader,
+  defaultAttachmentsDirectory,
+  defaultCloudConfigPath,
+  defaultDatabasePath,
+  defaultMigrationStatePath,
+  migrationSourceKey,
+  openLocalWriter,
+  readCloudCompanionConfig,
+  readMigrationState,
+  sha256Hex,
+  sourceBucket,
+  taskContentDigest,
+  writeMigrationState,
+} from "./cloud-migration.mjs";
 import { normalizeCloudUrl } from "../server/cloud-config.mjs";
 import {
   DEFAULT_PROJECT_ID,
@@ -26,7 +43,7 @@ const sourceRuntimeFile = path.resolve(
   ".data",
   "launcher-runtime.json",
 );
-const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help"]);
+const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help", "dry-run"]);
 const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 
 const COMMAND_OPTIONS = new Map([
@@ -37,6 +54,7 @@ const COMMAND_OPTIONS = new Map([
   ["cloud login", new Set(["url", "actor-name", "json"])],
   ["cloud status", new Set(["json"])],
   ["cloud logout", new Set(["json"])],
+  ["cloud migrate", new Set(["project", "dry-run", "cloud-config", "state-file", "json"])],
   ["issue list", new Set(["project", "status", "archived", "json"])],
   ["issue get", new Set(["json"])],
   [
@@ -131,6 +149,7 @@ Commands:
   project readme set [PROJECT_ID] (--content TEXT | --file FILE) [--if-version N]
   cloud login --url URL --actor-name NAME
   cloud status|logout
+  cloud migrate --project PROJECT_ID [--dry-run] [--cloud-config FILE] [--state-file FILE]
   issue list|get|create|update|move|archive|restore|tree|relation
   comment list ISSUE_ID [--after CURSOR]
   comment add ISSUE_ID (--body TEXT | --body-file FILE) [--thread-id ID]
@@ -368,6 +387,9 @@ async function execute(parsed, overrides) {
     case "cloud logout":
       expectOperandCount(parsed, 0);
       return api.request("DELETE", "/api/local/cloud-session");
+    case "cloud migrate":
+      expectOperandCount(parsed, 0);
+      return migrateCloudBoard(parsed.options, overrides);
     case "issue list":
       expectOperandCount(parsed, 0);
       return listIssues(api, parsed.options);
@@ -802,6 +824,258 @@ async function cloudLogin(api, rawUrl, actorName, overrides) {
     actorName,
     sharedKey,
   });
+}
+
+// Migrates a shared cloud board (identified by cloud-companion.json) into a
+// local project. Reads the remote board directly over HTTP (see
+// cloud-migration.mjs) and writes straight into the local SQLite database
+// via TaskboardDatabase — NOT through the local HTTP API and NOT through
+// server/cloud-proxy.mjs's forwarding path. Both matter: cloud-proxy.mjs is
+// scheduled for deletion later in this change (design.md "遷移路徑從零建立，
+// 不重用既有 CLI 匯出/匯入機制"), and — more importantly — while cloud mode
+// is still configured (the exact situation this tool exists for),
+// server/app.mjs forwards every /api/* request outside the local-companion
+// allowlist to the cloud. POSTing through the local HTTP API here would
+// silently round-trip migrated data back to the cloud instead of landing in
+// the local project.
+//
+// threadId/threadBinding/developmentContext are deliberately NOT copied from
+// the cloud record: per architect.md's plane separation, those are
+// local-only "execution overlay" fields tied to a specific device/Codex
+// thread and must not be replayed into a different local environment.
+// startDate/dueDate/recurrence ARE copied: those are shared work-content
+// fields, not execution state. Creator/assignee/author identity IS copied
+// verbatim from the cloud record, so migrated content keeps its original
+// attribution instead of appearing as authored by the migration tool.
+async function migrateCloudBoard(options, overrides) {
+  const projectId = requiredOption(options, "project");
+  const dryRun = Boolean(options["dry-run"]);
+  const env = overrides.env ?? process.env;
+  const cloudConfigPath = options["cloud-config"] !== undefined
+    ? resolveInputPath(options["cloud-config"], overrides)
+    : defaultCloudConfigPath(env);
+  const stateFilePath = options["state-file"] !== undefined
+    ? resolveInputPath(options["state-file"], overrides)
+    : defaultMigrationStatePath(env);
+  const databasePath = defaultDatabasePath(env);
+  const attachmentsDirectory = defaultAttachmentsDirectory(env);
+
+  const credentials = await readCloudCompanionConfig(cloudConfigPath, overrides);
+  const cloudReader = createCloudReader({ ...credentials, fetch: overrides.cloudFetch });
+
+  const writer = openLocalWriter({
+    databasePath,
+    attachmentsDirectory,
+    ...(overrides.openDatabase ? { openDatabase: overrides.openDatabase } : {}),
+  });
+  try {
+    const project = writer.getProject(projectId);
+    if (!project) {
+      throw new TaskctlError(`Local project '${projectId}' does not exist`, {
+        code: "PROJECT_NOT_FOUND",
+        exitCode: 4,
+      });
+    }
+
+    const snapshot = await collectCloudSnapshot(cloudReader);
+    const state = await readMigrationState(stateFilePath, overrides);
+    const bucket = sourceBucket(state, migrationSourceKey(credentials));
+
+    if (dryRun) {
+      return {
+        dryRun: true,
+        source: { remoteUrl: credentials.remoteUrl, actorName: credentials.actorName },
+        target: { projectId },
+        counts: snapshot.counts,
+        alreadyMigrated: {
+          tasks: snapshot.tasks.filter((task) => bucket.tasks[task.id]).length,
+          comments: snapshot.comments.filter((comment) => bucket.comments[comment.id]).length,
+          attachments: snapshot.attachments.filter((attachment) => bucket.attachments[attachment.id]).length,
+        },
+        tasks: snapshot.tasks.map((task) => ({
+          id: task.id,
+          title: task.title,
+          archived: Boolean(task.archivedAt),
+        })),
+        comments: snapshot.comments.map((comment) => ({ id: comment.id, taskId: comment.taskId })),
+        attachments: snapshot.attachments.map((attachment) => ({
+          id: attachment.id,
+          filename: attachment.filename,
+          taskId: attachment.taskId,
+          commentId: attachment.commentId,
+        })),
+      };
+    }
+
+    const counts = {
+      tasks: { migrated: 0, skipped: 0, failed: 0 },
+      comments: { migrated: 0, skipped: 0, failed: 0 },
+      attachments: { migrated: 0, skipped: 0, failed: 0 },
+    };
+    const failures = [];
+    const localTaskIdByCloudId = new Map();
+
+    for (const cloudTask of snapshot.tasks) {
+      const existing = bucket.tasks[cloudTask.id];
+      if (existing) {
+        counts.tasks.skipped += 1;
+        localTaskIdByCloudId.set(cloudTask.id, existing.localTaskId);
+        continue;
+      }
+      try {
+        const actor = {
+          type: cloudTask.creatorType,
+          id: cloudTask.creatorId,
+          name: cloudTask.creatorName,
+          avatarUrl: cloudTask.creatorAvatarUrl,
+        };
+        const localTask = writer.createTask({
+          projectId,
+          title: cloudTask.title,
+          description: cloudTask.description,
+          status: cloudTask.status,
+          priority: cloudTask.priority,
+          labels: cloudTask.labels,
+          sortOrder: cloudTask.sortOrder,
+          threadId: undefined,
+          threadBinding: undefined,
+          actor,
+          assignee: cloudTask.assignee,
+          developmentContext: null,
+          startDate: cloudTask.startDate ?? null,
+          dueDate: cloudTask.dueDate ?? null,
+          recurrence: cloudTask.recurrence ?? null,
+        });
+        if (cloudTask.archivedAt) {
+          writer.archiveTask(localTask.id, localTask.version, actor);
+        }
+        bucket.tasks[cloudTask.id] = {
+          localTaskId: localTask.id,
+          contentDigest: taskContentDigest(cloudTask),
+          migratedAt: new Date().toISOString(),
+        };
+        localTaskIdByCloudId.set(cloudTask.id, localTask.id);
+        counts.tasks.migrated += 1;
+      } catch (error) {
+        counts.tasks.failed += 1;
+        failures.push({
+          type: "task",
+          cloudId: cloudTask.id,
+          title: cloudTask.title,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    for (const cloudComment of snapshot.comments) {
+      const existing = bucket.comments[cloudComment.id];
+      if (existing) {
+        counts.comments.skipped += 1;
+        continue;
+      }
+      const localTaskId = localTaskIdByCloudId.get(cloudComment.taskId);
+      if (!localTaskId) {
+        counts.comments.failed += 1;
+        failures.push({
+          type: "comment",
+          cloudId: cloudComment.id,
+          reason: `Parent task '${cloudComment.taskId}' was not migrated`,
+        });
+        continue;
+      }
+      try {
+        const localComment = writer.createComment(localTaskId, {
+          body: cloudComment.body,
+          threadId: undefined,
+          threadBinding: undefined,
+          actor: {
+            type: cloudComment.authorType,
+            id: cloudComment.authorId,
+            name: cloudComment.authorName,
+            avatarUrl: cloudComment.authorAvatarUrl,
+          },
+        });
+        bucket.comments[cloudComment.id] = {
+          localCommentId: localComment.id,
+          localTaskId,
+          contentDigest: commentContentDigest(cloudComment),
+          migratedAt: new Date().toISOString(),
+        };
+        counts.comments.migrated += 1;
+      } catch (error) {
+        counts.comments.failed += 1;
+        failures.push({
+          type: "comment",
+          cloudId: cloudComment.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    for (const cloudAttachment of snapshot.attachments) {
+      const existing = bucket.attachments[cloudAttachment.id];
+      if (existing) {
+        counts.attachments.skipped += 1;
+        continue;
+      }
+      const localCommentId = cloudAttachment.commentId
+        ? bucket.comments[cloudAttachment.commentId]?.localCommentId
+        : null;
+      const localTaskId = cloudAttachment.commentId
+        ? null
+        : localTaskIdByCloudId.get(cloudAttachment.taskId);
+      if (cloudAttachment.commentId ? !localCommentId : !localTaskId) {
+        counts.attachments.failed += 1;
+        failures.push({
+          type: "attachment",
+          cloudId: cloudAttachment.id,
+          filename: cloudAttachment.filename,
+          reason: cloudAttachment.commentId
+            ? `Parent comment '${cloudAttachment.commentId}' was not migrated`
+            : `Parent task '${cloudAttachment.taskId}' was not migrated`,
+        });
+        continue;
+      }
+      try {
+        const downloaded = await cloudReader.downloadAttachment(cloudAttachment.id);
+        const attachmentInput = {
+          filename: cloudAttachment.filename,
+          contentType: cloudAttachment.contentType,
+          kind: cloudAttachment.kind === "inline" ? "inline" : "attachment",
+          bytes: downloaded.bytes,
+        };
+        const localAttachment = localCommentId
+          ? await writer.createCommentAttachment(localCommentId, attachmentInput)
+          : await writer.createTaskAttachment(localTaskId, attachmentInput);
+        bucket.attachments[cloudAttachment.id] = {
+          localAttachmentId: localAttachment.id,
+          sha256: sha256Hex(downloaded.bytes),
+          migratedAt: new Date().toISOString(),
+        };
+        counts.attachments.migrated += 1;
+      } catch (error) {
+        counts.attachments.failed += 1;
+        failures.push({
+          type: "attachment",
+          cloudId: cloudAttachment.id,
+          filename: cloudAttachment.filename,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    await writeMigrationState(stateFilePath, state, overrides);
+
+    return {
+      target: { projectId },
+      source: { remoteUrl: credentials.remoteUrl, actorName: credentials.actorName },
+      counts,
+      failures,
+      stateFile: stateFilePath,
+    };
+  } finally {
+    writer.close();
+  }
 }
 
 async function readSecretFromInput(input, output) {

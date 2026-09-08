@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { JIRA_PROJECT_ID } from "../shared/domain.mjs";
 import { ApiError } from "./database.mjs";
+import { registerProvider } from "./provider-registry.mjs";
 
 const JIRA_FIELDS = [
   "summary",
@@ -17,6 +18,33 @@ const JIRA_FIELDS = [
 ];
 const SYNC_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
+
+// Field-by-field verification against this file's actual behavior: pca-group2-h1.md §2.
+export const JIRA_CAPABILITIES = Object.freeze({
+  createIssue: false,
+  updateAssignee: false,
+  comments: "none",
+  attachments: "none",
+  relations: "none",
+  webhook: false,
+  incrementalSync: false,
+  manualArchive: false,
+  manualDelete: false,
+  manualMove: false,
+  assigneeEdit: false,
+  projectReassign: false,
+});
+
+// architect.md names these methods but never defines their payload shapes — see pca-group2-h1.md.
+function unspecifiedProviderMethod(methodName) {
+  return async () => {
+    throw new ApiError(
+      501,
+      "JIRA_PROVIDER_METHOD_UNSPECIFIED",
+      `IssueProvider.${methodName} 尚未實作：architect.md 未定義此方法的 payload 型別，provider-contract-abstraction §2 僅完成介面形狀與既有行為保留，實作留待型別定義補齊後的後續回合處理`,
+    );
+  };
+}
 
 function quoteJqlString(value) {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -461,5 +489,18 @@ export function createJiraIntegration({ configStore, database, fetch: fetchImple
       const transition = await resolveTransition(config, task.externalKey, status);
       await applyTransition(config, task.externalKey, transition);
     },
+    // architect.md IssueProvider shape — payload contracts unspecified, see JIRA_CAPABILITIES above.
+    listIssues: unspecifiedProviderMethod("listIssues"),
+    getIssue: unspecifiedProviderMethod("getIssue"),
+    createIssue: unspecifiedProviderMethod("createIssue"),
+    updateIssue: unspecifiedProviderMethod("updateIssue"),
+    listStatuses: unspecifiedProviderMethod("listStatuses"),
+    listLabels: unspecifiedProviderMethod("listLabels"),
+    listComments: unspecifiedProviderMethod("listComments"),
+    reconcileIssue: unspecifiedProviderMethod("reconcileIssue"),
+    reconcileSince: unspecifiedProviderMethod("reconcileSince"),
+    capabilities: JIRA_CAPABILITIES,
   };
 }
+
+registerProvider("jira", { capabilities: JIRA_CAPABILITIES });

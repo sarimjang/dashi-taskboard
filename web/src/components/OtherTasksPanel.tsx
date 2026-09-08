@@ -48,28 +48,28 @@ function ArchivedTaskCard({
           <StatusIcon status={task.status} size={14} />
           {taskStatusLabel(language, task.status)}
         </span>
-        {task.source !== "jira" && (
-          <>
-            <button
-              className="archived-task-action archived-task-restore"
-              type="button"
-              disabled={busy}
-              onClick={() => onRestore(task)}
-            >
-              <RefreshIcon color="currentColor" />
-              {restoring ? text("恢复中…", "Restoring…") : text("恢复", "Restore")}
-            </button>
-            <button
-              className="archived-task-action archived-task-delete"
-              type="button"
-              aria-label={text(`永久删除 ${displayIdentifier}`, `Permanently delete ${displayIdentifier}`)}
-              title={text("永久删除", "Delete permanently")}
-              disabled={busy}
-              onClick={() => onDelete(task)}
-            >
-              <DeleteIcon color="currentColor" />
-            </button>
-          </>
+        {task.capabilities.manualArchive && (
+          <button
+            className="archived-task-action archived-task-restore"
+            type="button"
+            disabled={busy}
+            onClick={() => onRestore(task)}
+          >
+            <RefreshIcon color="currentColor" />
+            {restoring ? text("恢复中…", "Restoring…") : text("恢复", "Restore")}
+          </button>
+        )}
+        {task.capabilities.manualDelete && (
+          <button
+            className="archived-task-action archived-task-delete"
+            type="button"
+            aria-label={text(`永久删除 ${displayIdentifier}`, `Permanently delete ${displayIdentifier}`)}
+            title={text("永久删除", "Delete permanently")}
+            disabled={busy}
+            onClick={() => onDelete(task)}
+          >
+            <DeleteIcon color="currentColor" />
+          </button>
         )}
       </div>
     </article>

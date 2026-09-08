@@ -24,6 +24,7 @@ import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createJiraConfigStore } from "./jira-config.mjs";
 import { createJiraIntegration } from "./jira-integration.mjs";
 import { ProjectSummaryService } from "./project-summary.mjs";
+import { getProvider, getProviderCapabilities } from "./provider-registry.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
@@ -2858,14 +2859,18 @@ export function createTaskboardServer(options = {}) {
           const current = database.getTask(id);
           if (!current) throw new ApiError(404, "TASK_NOT_FOUND", `Task '${id}' does not exist`);
           let jiraChanged = false;
-          if (current.source !== "jira" && changes.projectId === JIRA_PROJECT_ID) {
+          if (
+            getProvider(current.source) === null
+            && changes.projectId === JIRA_PROJECT_ID
+            && !getProviderCapabilities("jira").projectReassign
+          ) {
             throw new ApiError(
               409,
               "JIRA_PROJECT_MOVE_UNAVAILABLE",
               "本地任务不能移入 Jira 同步项目",
             );
           }
-          if (current.source === "jira") {
+          if (getProvider(current.source) !== null) {
             if (current.version !== version) {
               throw new ApiError(409, "VERSION_CONFLICT", "Task changed since it was last read", {
                 expectedVersion: version,
@@ -2875,10 +2880,10 @@ export function createTaskboardServer(options = {}) {
             if (current.archivedAt !== null) {
               throw new ApiError(409, "TASK_ARCHIVED", "Archived tasks cannot be updated");
             }
-            if (Object.hasOwn(changes, "projectId")) {
+            if (Object.hasOwn(changes, "projectId") && !current.capabilities.projectReassign) {
               throw new ApiError(409, "JIRA_PROJECT_MOVE_UNAVAILABLE", "Jira 任务不能移到本地项目");
             }
-            if (assigneeTarget !== undefined) {
+            if (assigneeTarget !== undefined && !current.capabilities.assigneeEdit) {
               throw new ApiError(409, "JIRA_ASSIGNEE_UNAVAILABLE", "请在 Jira 中修改经办人");
             }
             const dueDate = Object.hasOwn(changes, "dueDate") ? changes.dueDate : current.dueDate;
@@ -2915,7 +2920,7 @@ export function createTaskboardServer(options = {}) {
         }
         if (!action && request.method === "DELETE") {
           const current = database.getTask(id);
-          if (current?.source === "jira") {
+          if (current && !current.capabilities.manualDelete) {
             throw new ApiError(409, "JIRA_DELETE_UNAVAILABLE", "Jira 任务不能从 Taskboard 永久删除");
           }
           const { version } = parseArchive(await readJson(request));
@@ -2934,7 +2939,7 @@ export function createTaskboardServer(options = {}) {
           const move = resolveInputThreadBinding(parseMove(await readJson(request)));
           const current = database.getTask(id);
           if (!current) throw new ApiError(404, "TASK_NOT_FOUND", `Task '${id}' does not exist`);
-          if (current.source === "jira") {
+          if (!current.capabilities.manualMove) {
             if (current.version !== move.version) {
               throw new ApiError(409, "VERSION_CONFLICT", "Task changed since it was last read", {
                 expectedVersion: move.version,
@@ -2960,7 +2965,7 @@ export function createTaskboardServer(options = {}) {
         }
         if (action === "archive" && request.method === "POST") {
           const current = database.getTask(id);
-          if (current?.source === "jira") {
+          if (current && !current.capabilities.manualArchive) {
             throw new ApiError(409, "JIRA_ARCHIVE_UNAVAILABLE", "Jira 任务由同步范围自动管理，不能手动归档");
           }
           const { version, threadId, threadBinding } = resolveInputThreadBinding(
@@ -2978,7 +2983,7 @@ export function createTaskboardServer(options = {}) {
         }
         if (action === "restore" && request.method === "POST") {
           const current = database.getTask(id);
-          if (current?.source === "jira") {
+          if (current && !current.capabilities.manualArchive) {
             throw new ApiError(409, "JIRA_RESTORE_UNAVAILABLE", "Jira 任务由同步范围自动管理，不能手动恢复");
           }
           const { version, threadId, threadBinding } = resolveInputThreadBinding(

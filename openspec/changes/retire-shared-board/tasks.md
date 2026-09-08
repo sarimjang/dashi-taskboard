@@ -13,14 +13,17 @@
 
 ## 3. 移除雲端寫入路徑（僅在第 2 節任務全數驗證通過後才可開始）
 
-- [ ] 3.1 移除 `server/cloud-proxy.mjs` 的 `createCloudProxy`/`forward`/`webSocketTarget`/`basicAuthorization` 與相關雲端轉發邏輯，保留 `isLocalCompanionRoute` 及其呼叫點不變——驗證方式：`npm test` 通過，且對任一原本由 `createCloudProxy` 處理的路徑發送請求得到標準 404，符合 spec 的 Request to a retired cloud proxy endpoint 情境
-- [ ] 3.2 移除 `server/app.mjs` 內驗證 `threadBinding.{codexProjectId, codexHostId, workspacePath}` 的區塊與呼叫 `createCloudProxy` 的接線，確保「Cloud write path no longer accepts device/session identifiers after migration tooling ships」需求成立——驗證方式：`npm test` 通過，且伺服器 log 在對已刪除端點發送請求後不含任何 sharedKey/actorName/remoteUrl 相關記錄
-- [ ] 3.3 移除 `server/cloud-config.mjs` 整個共享金鑰設定 schema 與 store——驗證方式：`npm test` 通過，且全 repo grep 確認 `sharedKey`/`actorName`（雲端代理意義下）不再被任何程式碼路徑讀取
-- [ ] 3.4 [P] 移除 `cloud/`（含 `cloud/src/index.mjs` 與 `cloud/migrations/`）與 `wrangler.jsonc`——驗證方式：`git status` 確認這些路徑已從 repo 移除，且既有建置腳本不再嘗試部署或引用這些檔案
-- [ ] 3.5 確認 `resolveDevelopmentContext`/`resolveProjectWorkspace` 函式本身未被本節任何刪除動作影響——驗證方式：對這兩個函式涵蓋範圍內的既有測試全數執行，確認行為與刪除前一致，同時驗證 Local companion routes remain unaffected 情境
+- [x] 3.1 移除 `server/cloud-proxy.mjs` 的 `createCloudProxy`/`forward`/`webSocketTarget`/`basicAuthorization` 與相關雲端轉發邏輯，保留 `isLocalCompanionRoute` 及其呼叫點不變——驗證方式：`npm test` 通過，且對任一原本由 `createCloudProxy` 處理的路徑發送請求得到標準 404，符合 spec 的 Request to a retired cloud proxy endpoint 情境
+- [x] 3.2 移除 `server/app.mjs` 內驗證 `threadBinding.{codexProjectId, codexHostId, workspacePath}` 的區塊與呼叫 `createCloudProxy` 的接線，確保「Cloud write path no longer accepts device/session identifiers after migration tooling ships」需求成立——驗證方式：`npm test` 通過，且伺服器 log 在對已刪除端點發送請求後不含任何 sharedKey/actorName/remoteUrl 相關記錄
+- [x] 3.3 移除 `server/cloud-config.mjs` 整個共享金鑰設定 schema 與 store——驗證方式：`npm test` 通過，且全 repo grep 確認 `sharedKey`/`actorName`（雲端代理意義下）不再被任何程式碼路徑讀取
+  - **範圍擴張（必要前提，非選擇性，獨立審查驗證通過）**：`setProjectWorkspace`/`projectMappings` 除 `normalizeCloudUrl` 外還被 `PUT /api/local/project-mappings/:id` 路由、`GET /api/projects` 的 workspacePath fallback、`GET .../development-contexts` 三處依賴，一併移除（含 `cli/taskctl.mjs` 的 `project map` 子指令，其唯一呼叫來源）；否則整檔刪除 `cloud-config.mjs` 會留下未定義引用。
+- [x] 3.4 [P] 移除 `cloud/`（含 `cloud/src/index.mjs` 與 `cloud/migrations/`）與 `wrangler.jsonc`——驗證方式：`git status` 確認這些路徑已從 repo 移除，且既有建置腳本不再嘗試部署或引用這些檔案
+  - **執行結果偏離字面文字，PM 已核准，獨立審查驗證通過（commit 925708a）**：`cloud/` 與 `wrangler.jsonc` 皆**原樣保留**，未刪除。`cloud/` 作為 `test/helpers/cloud-worker-harness.mjs` 的 miniflare 測試 fixture 留存（Option 1，供 §2 遷移子指令測試使用）；`wrangler.jsonc` 因既有、無關的 `test/cloud-migration.test.mjs` 有案例會實際呼叫真正 `wrangler` CLI 讀取它（已 reproducible 驗證：搬走即 ENOENT），且該檔案不含任何密鑰（僅 `database_id` 資源識別碼）。實際刪除範圍：`wrangler.jsonc`/`cloud/` 相關的**部署** npm scripts（`dev:cloud`/`cloud:migrate(:local)`/`cloud:deploy(:dry-run)`），`isLocalCompanionRoute`/`test:cloud`/`cloud:data` 不受影響。詳見 `changes/retire-shared-board/handoffs/{rsb-remove-cloud-2-h1,rsb-remove-cloud-review-h1}.md`。
+- [x] 3.5 確認 `resolveDevelopmentContext`/`resolveProjectWorkspace` 函式本身未被本節任何刪除動作影響——驗證方式：對這兩個函式涵蓋範圍內的既有測試全數執行，確認行為與刪除前一致，同時驗證 Local companion routes remain unaffected 情境
 
 ## 4. 測試與文件收尾
 
 - [ ] 4.1 移除或改寫 `test/cloud-shared-worker.test.mjs`、`test/cloud-companion.test.mjs`、`test/server.test.mjs` 裡測試雲端代理轉發行為的案例，改為測試端點已退場（404）——驗證方式：`npm test` 全綠，且這三個測試檔案裡不再有任何斷言雲端代理成功轉發的案例
 - [ ] 4.2 [P] 移除 `docs/cloud-collaboration.md`，並在 README 或對應文件補上共享雲端看板功能已退場、資料可透過遷移子指令匯出的說明——驗證方式：`docs/cloud-collaboration.md` 已不存在，且對應文件包含上述說明文字
 - [ ] 4.3 [P] 移除 `cli/taskctl.mjs` 依賴 `normalizeCloudUrl` 的 cloud-configure 子指令——驗證方式：`taskctl --help`（或等效指令）的輸出不再列出 cloud-configure 子指令，且 `npm test` 中對應的舊測試已同步移除
+  - **部分已完成（§3，commit 925708a，被迫非選擇）**：`cloud login`/`cloud status`/`cloud logout` 子指令與 `normalizeCloudUrl` import 已移除（`taskctl --help` 已確認不再列出）——其依賴的 `/api/local/cloud-session` 路由已在 3.2 隨之刪除，留著只會打一個永遠 404 的端點。**尚未完成**：`test/cloud-companion.test.mjs` 裡呼叫 `runCli(["cloud","status"|"login"|"logout"|...])`/`runCli(["project","map",...])` 的舊測試案例（目前計入 §3 已知的 23 個預期內失敗）尚未同步移除——這是本項驗證方式明確要求的「`npm test` 中對應的舊測試已同步移除」，仍待本節完成。

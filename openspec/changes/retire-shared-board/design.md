@@ -4,6 +4,8 @@
 
 這條路徑本身已經跟兩個必須保留的機制乾淨分離：`isLocalCompanionRoute(pathname)`（`server/cloud-proxy.mjs`）明確 allowlist 了 `/health`、`/api/meta`、`/api/device-workspaces`、`/api/local/cloud-session`、所有 `/api/local/*` 與每專案 `/development-contexts`，這些路由永遠不會被代理到雲端；`resolveDevelopmentContext`/`resolveProjectWorkspace`（`server/app.mjs`）則是把 task 對應到本機開發 worktree 的邏輯，雲端與本機路徑都會呼叫它，但它本身不含任何雲端轉發程式碼。
 
+> **§3 執行後校正（獨立審查 rsb-remove-cloud-review 發現，非阻塞）**：`resolveDevelopmentContext` 實際上從未以此名稱作為頂層函式存在——它只是 `createCloudProxy({...})` 呼叫時傳入的一個內聯匿名回呼（option key 叫這個名字），本身依賴 `cloudConfig.read()`/`projectMappings`，屬雲端專屬邏輯，已隨 §3 一併刪除（正確行為）。真正「本機、雲端與本機路徑共用、不含雲端轉發程式碼」的那部分邏輯是 `scanDevelopmentContexts` 函式，此函式定義本身在 §3 未被觸碰（逐字元未變，已獨立驗證）。`resolveProjectWorkspace` 的敘述準確無誤。
+
 `workspacePath`/`codexHostId`/`codexProjectId` 這三個欄位名稱也出現在約 20 個與雲端代理無關的檔案（`web/src/App.tsx`、`server/ai-chat*.mjs`、`scripts/codex-injector*.mjs` 等）——初步研判是本機開發環境識別用途的同名欄位，非本 change 範圍，但尚未逐一確認，列為本 change 執行期間需要 apply-executor 逐檔核實的項目。
 
 ## Goals / Non-Goals

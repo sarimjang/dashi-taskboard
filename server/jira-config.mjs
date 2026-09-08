@@ -12,7 +12,26 @@ export class JiraConfigError extends Error {
   }
 }
 
-export function normalizeJiraUrl(value) {
+const JIRA_INSECURE_LOOPBACK_ENV_VAR = "CODEX_TASKBOARD_JIRA_ALLOW_INSECURE_LOOPBACK";
+
+function isLoopbackHostname(hostname) {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host === "[::1]") return true;
+  return /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+function isInsecureLoopbackFlagEnabled(env) {
+  return String(env[JIRA_INSECURE_LOOPBACK_ENV_VAR] ?? "").trim() === "1";
+}
+
+// Default-deny: plaintext HTTP is only ever accepted for a loopback base URL,
+// and only when the caller has explicitly opted in via env var. There is no
+// "allow by default, deny in special cases" branch — matches the loopback
+// opt-in precedent in app.mjs's isLanAccessEnabled/resolveHost.
+export function normalizeJiraUrl(
+  value,
+  allowInsecureLoopback = isInsecureLoopbackFlagEnabled(process.env),
+) {
   if (typeof value !== "string" || value.includes("?") || value.includes("#")) {
     throw new JiraConfigError(
       "INVALID_JIRA_URL",
@@ -35,6 +54,12 @@ export function normalizeJiraUrl(value) {
     throw new JiraConfigError(
       "INVALID_JIRA_URL",
       "Jira 地址必须使用 http 或 https，且不能包含账号、查询参数或片段",
+    );
+  }
+  if (url.protocol === "http:" && !(allowInsecureLoopback && isLoopbackHostname(url.hostname))) {
+    throw new JiraConfigError(
+      "JIRA_URL_REQUIRES_HTTPS",
+      `Jira 地址必须使用 HTTPS，除非目标是 loopback 地址且已显式设置环境变量 ${JIRA_INSECURE_LOOPBACK_ENV_VAR}=1`,
     );
   }
   url.pathname = url.pathname.replace(/\/+$/, "");

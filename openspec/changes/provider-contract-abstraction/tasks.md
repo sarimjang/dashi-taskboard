@@ -17,11 +17,11 @@
 
 ## 4. 移除 server/app.mjs 的字面 source 判斷
 
-- [ ] 4.1 `PATCH /api/tasks/:id` 路由中，判斷是否拋出 `JIRA_ASSIGNEE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.assigneeEdit`；判斷是否拋出 `JIRA_PROJECT_MOVE_UNAVAILABLE`（含本地任務不能移入 Jira 項目與 Jira 任務不能移出兩個方向）的邏輯改為讀取對應的 `projectReassign` 能力；判斷是否需要呼叫 `jira.updateTask` 的邏輯改為讀取 provider 是否存在（`getProvider(current.source) !== null`）而非字面比對 `"jira"`。驗證：既有涵蓋這幾個錯誤碼（`JIRA_ASSIGNEE_UNAVAILABLE`/`JIRA_PROJECT_MOVE_UNAVAILABLE`）的測試案例逐項通過，斷言的錯誤碼與觸發條件不變。
-- [ ] 4.2 `DELETE /api/tasks/:id` 路由中，判斷是否拋出 `JIRA_DELETE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.manualDelete`。驗證：既有涵蓋 `JIRA_DELETE_UNAVAILABLE` 的測試案例通過。
-- [ ] 4.3 `POST /api/tasks/:id/move` 路由中，判斷是否需要版本衝突檢查、封存檢查、呼叫 `jira.moveTask` 的邏輯改為讀取 `current.capabilities.manualMove`。驗證：既有涵蓋 move 相關錯誤碼與 Jira move 呼叫時機的測試案例通過。
-- [ ] 4.4 `POST /api/tasks/:id/archive` 與 `POST /api/tasks/:id/restore` 路由中，判斷是否拋出 `JIRA_ARCHIVE_UNAVAILABLE`/`JIRA_RESTORE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.manualArchive`。驗證：既有涵蓋這兩個錯誤碼的測試案例通過。
-- [ ] 4.5 對 `server/app.mjs`、`server/database.mjs` 全檔執行 `grep -n 'source === "jira"\|source !== "jira"'`，確認除了 `database.mjs` 中定義 `source` 欄位本身值的那一行映射邏輯外零殘留——驗證規格要求「Zero remaining literal source string comparisons」成立。驗證：grep 結果附在該任務的完成紀錄中。
+- [x] 4.1 `PATCH /api/tasks/:id` 路由中，判斷是否拋出 `JIRA_ASSIGNEE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.assigneeEdit`；判斷是否拋出 `JIRA_PROJECT_MOVE_UNAVAILABLE`（含本地任務不能移入 Jira 項目與 Jira 任務不能移出兩個方向）的邏輯改為讀取對應的 `projectReassign` 能力；判斷是否需要呼叫 `jira.updateTask` 的邏輯改為讀取 provider 是否存在（`getProvider(current.source) !== null`）而非字面比對 `"jira"`。驗證：既有涵蓋這幾個錯誤碼（`JIRA_ASSIGNEE_UNAVAILABLE`/`JIRA_PROJECT_MOVE_UNAVAILABLE`）的測試案例逐項通過，斷言的錯誤碼與觸發條件不變。
+- [x] 4.2 `DELETE /api/tasks/:id` 路由中，判斷是否拋出 `JIRA_DELETE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.manualDelete`。驗證：既有涵蓋 `JIRA_DELETE_UNAVAILABLE` 的測試案例通過。
+- [x] 4.3 `POST /api/tasks/:id/move` 路由中，判斷是否需要版本衝突檢查、封存檢查、呼叫 `jira.moveTask` 的邏輯改為讀取 `current.capabilities.manualMove`。驗證：既有涵蓋 move 相關錯誤碼與 Jira move 呼叫時機的測試案例通過。
+- [x] 4.4 `POST /api/tasks/:id/archive` 與 `POST /api/tasks/:id/restore` 路由中，判斷是否拋出 `JIRA_ARCHIVE_UNAVAILABLE`/`JIRA_RESTORE_UNAVAILABLE` 的邏輯改為讀取 `current.capabilities.manualArchive`。驗證：既有涵蓋這兩個錯誤碼的測試案例通過。
+- [x] 4.5 對 `server/app.mjs`、`server/database.mjs` 全檔執行 `grep -n 'source === "jira"\|source !== "jira"'`，確認除了 `database.mjs` 中定義 `source` 欄位本身值的那一行映射邏輯外零殘留——驗證規格要求「Zero remaining literal source string comparisons」成立。驗證：grep 結果附在該任務的完成紀錄中。
 
 ## 5. 前端改讀 capabilities
 

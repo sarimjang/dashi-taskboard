@@ -5,10 +5,8 @@ import { createServer } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { WebSocket as WebSocketClient, WebSocketServer } from "ws";
 
 import {
   DEFAULT_PROJECT_ID,
@@ -20,14 +18,8 @@ import {
 import { resolveCodexExecutable } from "../shared/codex-executable.mjs";
 import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
 import { AiChatService } from "./ai-chat.mjs";
-import { resolveAiWorkspace, resolveMappedAiWorkspace } from "./ai-chat-catalog.mjs";
+import { resolveAiWorkspace } from "./ai-chat-catalog.mjs";
 import { decodeComposerReferenceKey } from "./composer-reference.mjs";
-import { createCloudConfigStore } from "./cloud-config.mjs";
-import {
-  CloudProxyError,
-  createCloudProxy,
-  isLocalCompanionRoute,
-} from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createJiraConfigStore } from "./jira-config.mjs";
 import { createJiraIntegration } from "./jira-integration.mjs";
@@ -91,52 +83,6 @@ function sendJson(response, status, value, headers = {}) {
 function sendEmpty(response, status, headers = {}) {
   response.writeHead(status, { "cache-control": "no-store", ...headers });
   response.end();
-}
-
-function toFetchRequest(request) {
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(request.headers)) {
-    if (Array.isArray(value)) {
-      for (const entry of value) headers.append(name, entry);
-    } else if (value !== undefined) {
-      headers.set(name, value);
-    }
-  }
-  const init = { method: request.method, headers };
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    init.body = Readable.toWeb(request);
-    init.duplex = "half";
-  }
-  return new Request(`http://127.0.0.1${request.url}`, init);
-}
-
-async function sendFetchResponse(response, upstream) {
-  response.statusCode = upstream.status;
-  response.statusMessage = upstream.statusText;
-  for (const [name, value] of upstream.headers) {
-    if (
-      name === "connection"
-      || name === "content-encoding"
-      || name === "content-length"
-      || name === "set-cookie"
-      || name === "transfer-encoding"
-    ) {
-      continue;
-    }
-    response.setHeader(name, value);
-  }
-  const cookies = upstream.headers.getSetCookie?.() ?? [];
-  if (cookies.length > 0) response.setHeader("set-cookie", cookies);
-  if (!upstream.body) {
-    response.end();
-    return;
-  }
-  await new Promise((resolve, reject) => {
-    const body = Readable.fromWeb(upstream.body);
-    body.once("error", reject);
-    response.once("finish", resolve);
-    body.pipe(response);
-  });
 }
 
 function normalizeHostname(hostname) {
@@ -358,17 +304,6 @@ function stringField(value, name, { required = false, nullable = false, maxLengt
   }
   if (normalized.length > maxLength) {
     throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot exceed ${maxLength} characters`);
-  }
-  return normalized;
-}
-
-function pathField(value, name) {
-  const normalized = stringField(value, name, { nullable: true, maxLength: 4096 });
-  if (normalized === "") {
-    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot be empty`);
-  }
-  if (normalized?.includes("\0")) {
-    throw new ApiError(400, "INVALID_FIELD", `'${name}' cannot contain null bytes`);
   }
   return normalized;
 }
@@ -1638,7 +1573,6 @@ export function resolveServerOptions(options = {}) {
     dataDirectory,
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
     attachmentsDirectory: options.attachmentsDirectory ?? path.join(dataDirectory, "attachments"),
-    cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
     jiraConfigPath: options.jiraConfigPath ?? path.join(dataDirectory, "jira-connection.json"),
     clientStoragePath: options.clientStoragePath ?? path.join(dataDirectory, "client-storage.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
@@ -1722,9 +1656,6 @@ export function createTaskboardServer(options = {}) {
     });
     await clientStorageWrite;
   }
-  const cloudConfig = options.cloudConfigStore ?? createCloudConfigStore({
-    configPath: resolved.cloudConfigPath,
-  });
   const jiraConfig = options.jiraConfigStore ?? createJiraConfigStore({
     configPath: resolved.jiraConfigPath,
   });
@@ -1756,104 +1687,31 @@ export function createTaskboardServer(options = {}) {
     const threadBinding = currentHostThreadBinding(input.threadId);
     return threadBinding ? { ...input, threadBinding } : input;
   }
-  const cloudProxy = createCloudProxy({
-    configStore: cloudConfig,
-    fetch: options.remoteFetch ?? globalThis.fetch,
-    resolveThreadBinding: currentHostThreadBinding,
-    resolveDevelopmentContext: async (projectId, context) => {
-      if (!context.branch) return null;
-      const config = await cloudConfig.read();
-      const workspacePath = config.projectMappings[projectId];
-      if (!workspacePath) return null;
-      const result = await scanDevelopmentContexts(workspacePath, codexProcessEnvironment);
-      return result.contexts.find((candidate) => (
-        candidate.type === "worktree" && candidate.branch === context.branch
-      )) ?? null;
-    },
-    assertTaskProjectMoveAllowed: (taskId, targetProjectId) => {
-      if (!database.hasAiChatThreadProjectConflict(taskId, targetProjectId)) return;
-      throw new CloudProxyError(
-        409,
-        "AI_CHAT_PROJECT_MOVE_BLOCKED",
-        "Delete issue-linked AI conversations before moving the issue to another project",
-      );
-    },
-  });
-  async function readCloudJson(pathname) {
-    const upstream = await cloudProxy.forward(new Request(`http://127.0.0.1${pathname}`, {
-      headers: { accept: "application/json" },
-    }));
-    let payload;
-    try {
-      payload = await upstream.json();
-    } catch {
-      throw new ApiError(
-        upstream.ok ? 502 : upstream.status,
-        "INVALID_CLOUD_RESPONSE",
-        "Cloud taskboard returned an invalid JSON response",
-      );
-    }
-    if (!upstream.ok) {
-      throw new ApiError(
-        upstream.status,
-        payload?.error?.code ?? "CLOUD_REQUEST_FAILED",
-        payload?.error?.message ?? "Cloud taskboard request failed",
-        payload?.error?.details,
-      );
-    }
-    return payload;
-  }
-
   async function resolveAiChatContext(projectId, issueId) {
-    const config = await cloudConfig.read();
-    if (!config.remoteUrl) {
-      let resolvedWorkspace;
-      try {
-        resolvedWorkspace = await resolveAiWorkspace(
-          projectId,
-          resolved.codexStatePath,
-          database,
-        );
-      } catch (error) {
-        if (
-          !(error instanceof ApiError)
-          || error.code !== "PROJECT_WORKSPACE_UNAVAILABLE"
-          || projectId !== DEFAULT_PROJECT_ID
-        ) {
-          throw error;
-        }
-        resolvedWorkspace = {
-          workspacePath: PROJECT_ROOT,
-          addDirectories: [],
-          project: database.getProject(projectId),
-        };
+    let resolvedWorkspace;
+    try {
+      resolvedWorkspace = await resolveAiWorkspace(
+        projectId,
+        resolved.codexStatePath,
+        database,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof ApiError)
+        || error.code !== "PROJECT_WORKSPACE_UNAVAILABLE"
+        || projectId !== DEFAULT_PROJECT_ID
+      ) {
+        throw error;
       }
-      let issue;
-      if (issueId !== undefined) {
-        issue = database.getTask(issueId);
-        if (!issue || issue.projectId !== projectId || issue.archivedAt != null) {
-          throw new ApiError(
-            404,
-            "AI_CHAT_ISSUE_NOT_FOUND",
-            `Task '${issueId}' is not an active task in project '${projectId}'`,
-          );
-        }
-      }
-      return { ...resolvedWorkspace, issue };
+      resolvedWorkspace = {
+        workspacePath: PROJECT_ROOT,
+        addDirectories: [],
+        project: database.getProject(projectId),
+      };
     }
-
-    const projectPayload = await readCloudJson("/api/projects");
-    const project = Array.isArray(projectPayload.projects)
-      ? projectPayload.projects.find((candidate) => candidate?.id === projectId)
-      : null;
-    if (!project) {
-      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
-    }
-
     let issue;
     if (issueId !== undefined) {
-      const issuePayload = await readCloudJson(`/api/tasks/${encodeURIComponent(issueId)}`);
-      issue = issuePayload.task;
+      issue = database.getTask(issueId);
       if (!issue || issue.projectId !== projectId || issue.archivedAt != null) {
         throw new ApiError(
           404,
@@ -1862,12 +1720,6 @@ export function createTaskboardServer(options = {}) {
         );
       }
     }
-
-    const resolvedWorkspace = await resolveMappedAiWorkspace(
-      projectId,
-      project,
-      config.projectMappings,
-    );
     return { ...resolvedWorkspace, issue };
   }
 
@@ -2095,11 +1947,8 @@ export function createTaskboardServer(options = {}) {
         || pathname === "/api/device-workspaces"
         || isDevelopmentContextsRoute;
       // Machine-level metadata/capability routes stay loopback-only unconditionally,
-      // independent of the LAN flag, LAN authentication, or cloud mode. No exception.
+      // independent of the LAN flag or LAN authentication. No exception.
       if (isMachineCapabilityRoute) assertLoopbackRequest(request);
-      const capabilityCloudConfig = isMachineCapabilityRoute
-        ? await cloudConfig.read()
-        : null;
 
       if (pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
@@ -2210,48 +2059,6 @@ export function createTaskboardServer(options = {}) {
         return methodNotAllowed(response, ["GET", "PUT"]);
       }
 
-      if (pathname === "/api/local/cloud-session") {
-        if ([...url.searchParams.keys()].length > 0) {
-          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Cloud session routes do not accept query parameters");
-        }
-        if (request.method === "GET") {
-          const config = await cloudConfig.read();
-          return sendJson(response, 200, config.remoteUrl
-            ? {
-              mode: "cloud",
-              remoteUrl: config.remoteUrl,
-              actorName: config.actorName,
-              authenticated: true,
-            }
-            : { mode: "local", authenticated: false });
-        }
-        if (request.method === "PUT") {
-          const body = await readJson(request);
-          assertPlainObject(body);
-          assertAllowedKeys(body, new Set(["remoteUrl", "actorName", "sharedKey"]));
-          try {
-            const config = await cloudConfig.configure({
-              remoteUrl: body.remoteUrl,
-              actorName: body.actorName,
-              sharedKey: body.sharedKey,
-            });
-            return sendJson(response, 200, {
-              mode: "cloud",
-              remoteUrl: config.remoteUrl,
-              actorName: config.actorName,
-              authenticated: true,
-            });
-          } catch (error) {
-            throw new ApiError(400, error.code ?? "INVALID_CLOUD_CONFIG", error.message);
-          }
-        }
-        if (request.method === "DELETE") {
-          await cloudConfig.clearCloud();
-          return sendJson(response, 200, { mode: "local", authenticated: false });
-        }
-        return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
-      }
-
       if (pathname === "/api/local/jira-connection") {
         if ([...url.searchParams.keys()].length > 0) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Jira 连接接口不接受查询参数");
@@ -2260,14 +2067,6 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { connection: await jira.status() });
         }
         if (request.method === "PUT") {
-          const activeCloudConfig = await cloudConfig.read();
-          if (activeCloudConfig.remoteUrl) {
-            throw new ApiError(
-              409,
-              "JIRA_LOCAL_MODE_REQUIRED",
-              "Jira 连接当前仅支持本地数据模式，请先退出云端协作模式",
-            );
-          }
           const body = await readJson(request);
           assertPlainObject(body);
           assertAllowedKeys(body, new Set(["baseUrl", "username", "password", "projects"]));
@@ -2308,30 +2107,6 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { connection });
       }
 
-      const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
-      if (projectMappingRoute) {
-        if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
-        if ([...url.searchParams.keys()].length > 0) {
-          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Project mapping routes do not accept query parameters");
-        }
-        let projectId;
-        try {
-          projectId = decodeURIComponent(projectMappingRoute[1]);
-        } catch {
-          throw new ApiError(400, "INVALID_PATH", "Project id contains invalid encoding");
-        }
-        validateProjectId(projectId);
-        const body = await readJson(request);
-        assertPlainObject(body);
-        assertAllowedKeys(body, new Set(["workspacePath"]));
-        const workspacePath = pathField(body.workspacePath, "workspacePath");
-        if (!workspacePath || !path.isAbsolute(workspacePath)) {
-          throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
-        }
-        await cloudConfig.setProjectWorkspace(projectId, workspacePath);
-        return sendJson(response, 200, { projectId, workspacePath });
-      }
-
       if (pathname === "/api/meta") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         if ([...url.searchParams.keys()].length > 0) {
@@ -2343,16 +2118,6 @@ export function createTaskboardServer(options = {}) {
             localAiChat: !configuredTrustedOrigin
               && isLoopbackAddress(request.socket.remoteAddress),
           },
-          ...(capabilityCloudConfig?.remoteUrl
-            ? {
-              mode: "cloud",
-              realtime: {
-                transport: "websocket",
-                endpoint: "/api/events",
-              },
-              localCapabilities: { available: !configuredTrustedOrigin },
-            }
-            : {}),
         });
       }
 
@@ -2507,21 +2272,6 @@ export function createTaskboardServer(options = {}) {
         });
       }
 
-
-      let currentCloudConfig = null;
-      if (pathname.startsWith("/api/")) {
-        currentCloudConfig = await cloudConfig.read();
-        if (currentCloudConfig.remoteUrl) {
-          assertLoopbackRequest(request);
-          if (!isLocalCompanionRoute(pathname)) {
-            return sendFetchResponse(
-              response,
-              await cloudProxy.forward(toFetchRequest(request)),
-            );
-          }
-        }
-      }
-
       if (pathname === "/api/projects") {
         if (request.method === "GET") {
           if ([...url.searchParams.keys()].length > 0) {
@@ -2529,9 +2279,7 @@ export function createTaskboardServer(options = {}) {
           }
           const projects = database.listProjects().map((project) => ({
             ...project,
-            workspacePath: project.id === DEFAULT_PROJECT_ID
-              ? null
-              : currentCloudConfig?.projectMappings[project.id] ?? project.workspacePath,
+            workspacePath: project.id === DEFAULT_PROJECT_ID ? null : project.workspacePath,
           }));
           return sendJson(response, 200, { projects });
         }
@@ -2677,14 +2425,7 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "INVALID_PATH", "Project id contains invalid encoding");
         }
         validateProjectId(projectId);
-        const project = currentCloudConfig.remoteUrl
-          ? {
-            id: projectId,
-            workspacePath: projectId === DEFAULT_PROJECT_ID
-              ? null
-              : currentCloudConfig.projectMappings[projectId] ?? null,
-          }
-          : database.getProject(projectId);
+        const project = database.getProject(projectId);
         if (!project) throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
         const codexProjectId = stringField(url.searchParams.get("codexProjectId") ?? null, "codexProjectId", {
           nullable: true,
@@ -3272,129 +3013,8 @@ export function createTaskboardServer(options = {}) {
         sendJson(response, error.status, payload);
         return;
       }
-      if (error instanceof CloudProxyError) {
-        const payload = { error: { code: error.code, message: error.message } };
-        if (error.details !== undefined) payload.error.details = error.details;
-        sendJson(response, error.status, payload);
-        return;
-      }
       console.error(error);
       sendJson(response, 500, { error: { code: "INTERNAL_ERROR", message: "Internal server error" } });
-    }
-  });
-
-  const cloudRealtimeServer = new WebSocketServer({ noServer: true });
-  const cloudRealtimeSockets = new Set();
-
-  function rejectWebSocketUpgrade(socket, status, message) {
-    const body = `${message}\n`;
-    socket.end([
-      `HTTP/1.1 ${status} ${message}`,
-      "Connection: close",
-      "Content-Type: text/plain; charset=utf-8",
-      `Content-Length: ${Buffer.byteLength(body)}`,
-      "",
-      body,
-    ].join("\r\n"));
-  }
-
-  function closeOrTerminateWebSocket(webSocket, code, reason) {
-    if (webSocket.readyState !== WebSocketClient.OPEN) {
-      webSocket.terminate();
-      return;
-    }
-    if (code >= 1000 && ![1004, 1005, 1006, 1015].includes(code)) {
-      webSocket.close(code, reason);
-    } else {
-      webSocket.terminate();
-    }
-  }
-
-  server.on("upgrade", async (request, socket, head) => {
-    let remoteSocket;
-    try {
-      const incomingUrl = new URL(request.url, "http://127.0.0.1");
-      if (resolved.instanceToken) {
-        if (!incomingUrl.pathname.startsWith(`${routePrefix}/`)) {
-          rejectWebSocketUpgrade(socket, 404, "Not Found");
-          return;
-        }
-        request.url = `${incomingUrl.pathname.slice(routePrefix.length) || "/"}${incomingUrl.search}`;
-      }
-      assertTrustedNetworkRequest(
-        request,
-        Boolean(resolved.instanceToken),
-        resolved.trustedOrigins,
-      );
-      const url = new URL(request.url, "http://127.0.0.1");
-      if (url.pathname !== "/api/events" || [...url.searchParams.keys()].length > 0) {
-        rejectWebSocketUpgrade(socket, 404, "Not Found");
-        return;
-      }
-      assertLoopbackRequest(request);
-      const target = await cloudProxy.webSocketTarget("/api/events");
-      remoteSocket = new WebSocketClient(target.url, { headers: target.headers });
-      const pendingMessages = [];
-      const queueMessage = (data, isBinary) => pendingMessages.push({ data, isBinary });
-      remoteSocket.on("message", queueMessage);
-      await new Promise((resolve, reject) => {
-        const cleanup = () => {
-          remoteSocket.off("open", onOpen);
-          remoteSocket.off("error", onError);
-          remoteSocket.off("close", onClose);
-        };
-        const onOpen = () => {
-          cleanup();
-          resolve();
-        };
-        const onError = (error) => {
-          cleanup();
-          reject(error);
-        };
-        const onClose = () => {
-          cleanup();
-          reject(new Error("Cloud realtime connection closed before opening"));
-        };
-        remoteSocket.once("open", onOpen);
-        remoteSocket.once("error", onError);
-        remoteSocket.once("close", onClose);
-      });
-      cloudRealtimeServer.handleUpgrade(request, socket, head, (localSocket) => {
-        const pair = { localSocket, remoteSocket };
-        cloudRealtimeSockets.add(pair);
-        const removePair = () => cloudRealtimeSockets.delete(pair);
-        const forwardMessage = (data, isBinary) => {
-          if (localSocket.readyState === WebSocketClient.OPEN) {
-            localSocket.send(data, { binary: isBinary });
-          }
-        };
-
-        remoteSocket.off("message", queueMessage);
-        remoteSocket.on("message", forwardMessage);
-        for (const { data, isBinary } of pendingMessages) forwardMessage(data, isBinary);
-
-        localSocket.on("message", () => {
-          localSocket.close(1008, "Client messages are not supported");
-        });
-        localSocket.on("close", (code, reason) => {
-          removePair();
-          closeOrTerminateWebSocket(remoteSocket, code, reason);
-        });
-        localSocket.on("error", () => remoteSocket.terminate());
-
-        remoteSocket.on("close", (code, reason) => {
-          removePair();
-          closeOrTerminateWebSocket(localSocket, code, reason);
-        });
-        remoteSocket.on("error", () => {
-          if (localSocket.readyState === WebSocketClient.OPEN) {
-            localSocket.close(1011, "Cloud realtime connection failed");
-          }
-        });
-      });
-    } catch (error) {
-      remoteSocket?.terminate();
-      rejectWebSocketUpgrade(socket, error?.status ?? 502, "WebSocket connection failed");
     }
   });
 
@@ -3429,12 +3049,6 @@ export function createTaskboardServer(options = {}) {
       return server.address();
     },
     async close() {
-      for (const { localSocket, remoteSocket } of cloudRealtimeSockets) {
-        localSocket.terminate();
-        remoteSocket.terminate();
-      }
-      cloudRealtimeSockets.clear();
-      cloudRealtimeServer.close();
       const serverClosed = listening
         ? new Promise((resolve, reject) => {
             server.close((error) => error ? reject(error) : resolve());

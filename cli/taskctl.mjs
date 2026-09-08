@@ -24,7 +24,6 @@ import {
   taskContentDigest,
   writeMigrationState,
 } from "./cloud-migration.mjs";
-import { normalizeCloudUrl } from "../server/cloud-config.mjs";
 import {
   DEFAULT_PROJECT_ID,
   TASK_STATUSES,
@@ -49,11 +48,7 @@ const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 const COMMAND_OPTIONS = new Map([
   ["project list", new Set(["json"])],
   ["project create", new Set(["id", "name", "workspace-path", "json"])],
-  ["project map", new Set(["workspace-path", "json"])],
   ["project readme", new Set(["content", "file", "if-version", "json"])],
-  ["cloud login", new Set(["url", "actor-name", "json"])],
-  ["cloud status", new Set(["json"])],
-  ["cloud logout", new Set(["json"])],
   ["cloud migrate", new Set(["project", "dry-run", "cloud-config", "state-file", "json"])],
   ["issue list", new Set(["project", "status", "archived", "json"])],
   ["issue get", new Set(["json"])],
@@ -144,11 +139,8 @@ Commands:
   context current [--cwd PATH] [--json]
   project list
   project create --name NAME [--id ID] [--workspace-path PATH]
-  project map PROJECT_ID --workspace-path PATH
   project readme get [PROJECT_ID]
   project readme set [PROJECT_ID] (--content TEXT | --file FILE) [--if-version N]
-  cloud login --url URL --actor-name NAME
-  cloud status|logout
   cloud migrate --project PROJECT_ID [--dry-run] [--cloud-config FILE] [--state-file FILE]
   issue list|get|create|update|move|archive|restore|tree|relation
   comment list ISSUE_ID [--after CURSOR]
@@ -329,7 +321,7 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map/readme, cloud login/status/logout, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
+      "Expected one of: project list/create/readme, cloud migrate, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
@@ -338,7 +330,7 @@ async function execute(parsed, overrides) {
   const env = parsed.options["runtime-file"] === undefined
     ? processEnv
     : { ...processEnv, CODEX_TASKBOARD_RUNTIME_FILE: parsed.options["runtime-file"] };
-  const usesCompanionControl = command.startsWith("cloud ") || command === "project map";
+  const usesCompanionControl = command === "cloud migrate";
   const target = usesCompanionControl || env.CODEX_TASKBOARD_COMPANION_URL !== undefined
       ? await resolveCompanionUrl(env, overrides)
       : await resolveTaskboardBaseUrl(env, overrides);
@@ -359,34 +351,8 @@ async function execute(parsed, overrides) {
             : resolveInputPath(parsed.options["workspace-path"], overrides),
         ),
       });
-    case "project map":
-      expectOperandCount(parsed, 1);
-      return api.request(
-        "PUT",
-        `/api/local/project-mappings/${encodeURIComponent(parsed.operands[0])}`,
-        {
-          workspacePath: resolveInputPath(
-            requiredOption(parsed.options, "workspace-path"),
-            overrides,
-          ),
-        },
-      );
     case "project readme":
       return executeProjectReadme(api, parsed, overrides);
-    case "cloud login":
-      expectOperandCount(parsed, 0);
-      return cloudLogin(
-        api,
-        requiredOption(parsed.options, "url"),
-        requiredOption(parsed.options, "actor-name"),
-        overrides,
-      );
-    case "cloud status":
-      expectOperandCount(parsed, 0);
-      return api.request("GET", "/api/local/cloud-session");
-    case "cloud logout":
-      expectOperandCount(parsed, 0);
-      return api.request("DELETE", "/api/local/cloud-session");
     case "cloud migrate":
       expectOperandCount(parsed, 0);
       return migrateCloudBoard(parsed.options, overrides);
@@ -800,32 +766,6 @@ async function executeProjectReadme(api, parsed, overrides) {
   return api.request("GET", `/api/projects/${encodeURIComponent(projectId)}/readme`);
 }
 
-async function cloudLogin(api, rawUrl, actorName, overrides) {
-  let remoteUrl;
-  try {
-    remoteUrl = normalizeCloudUrl(rawUrl);
-  } catch (error) {
-    throw new TaskctlError(error instanceof Error ? error.message : String(error), {
-      code: error?.code ?? "INVALID_CLOUD_URL",
-      exitCode: 2,
-    });
-  }
-  const sharedKey = overrides.readSecret
-    ? await overrides.readSecret()
-    : await readSecretFromInput(
-      overrides.stdin ?? process.stdin,
-      overrides.stderr ?? process.stderr,
-    );
-  if (typeof sharedKey !== "string" || !sharedKey) {
-    throw usageError("Cloud shared key cannot be empty");
-  }
-  return api.request("PUT", "/api/local/cloud-session", {
-    remoteUrl,
-    actorName,
-    sharedKey,
-  });
-}
-
 // Migrates a shared cloud board (identified by cloud-companion.json) into a
 // local project. Reads the remote board directly over HTTP (see
 // cloud-migration.mjs) and writes straight into the local SQLite database
@@ -1076,49 +1016,6 @@ async function migrateCloudBoard(options, overrides) {
   } finally {
     writer.close();
   }
-}
-
-async function readSecretFromInput(input, output) {
-  if (!input.isTTY) {
-    let value = "";
-    for await (const chunk of input) value += chunk;
-    return value.replace(/\r?\n$/, "");
-  }
-
-  return new Promise((resolve, reject) => {
-    let value = "";
-    const wasRaw = input.isRaw;
-    const wasPaused = input.isPaused();
-    const finish = (error) => {
-      input.off("data", onData);
-      input.setRawMode(wasRaw);
-      if (wasPaused) input.pause();
-      output.write("\n");
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = (chunk) => {
-      for (const character of String(chunk)) {
-        if (character === "\r" || character === "\n") return finish();
-        if (character === "\u0003") {
-          return finish(new TaskctlError("Cloud login canceled", {
-            code: "CANCELED",
-            exitCode: 2,
-          }));
-        }
-        if (character === "\u007f" || character === "\b") {
-          value = value.slice(0, -1);
-        } else {
-          value += character;
-        }
-      }
-    };
-    output.write("Shared key: ");
-    input.setRawMode(true);
-    input.setEncoding("utf8");
-    input.resume();
-    input.on("data", onData);
-  });
 }
 
 async function listIssues(api, options) {

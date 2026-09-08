@@ -1,5 +1,18 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
 
@@ -244,4 +257,194 @@ test("the injected iframe follows the configured local service port", () => {
   assert.match(source, /const taskboardBaseUrl = `\$\{taskboardOrigin\}\/\$\{encodeURIComponent\(taskboardInstanceToken\)\}`/);
   assert.match(source, /const taskboardPageUrl = `\$\{taskboardBaseUrl\}\/\?host=codex`/);
   assert.match(source, /window\.__CODEX_TASKBOARD_URL__ = \$\{JSON\.stringify\(taskboardPageUrl\)\}/);
+});
+
+test("the Codex profile directory is no longer a predictable shared-temp path", () => {
+  assert.doesNotMatch(source, /codex-taskboard-independent-profile-v2/);
+  assert.doesNotMatch(source, /os\.tmpdir\(\)/);
+  assert.doesNotMatch(source, /import os from "node:os"/);
+  assert.match(source, /async function ensureOwnedPrivateDirectory/);
+  assert.match(source, /async function loadOrCreateCodexProfileDirectoryName/);
+  assert.match(source, /async function computeIndependentCodexProfilePath/);
+  assert.match(source, /randomBytes\(16\)\.toString\("hex"\)/);
+  assert.match(source, /codex-profile-directory\.json/);
+});
+
+function extractSource(startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.notEqual(start, -1, `expected to find ${startMarker}`);
+  const end = source.indexOf(endMarker, start);
+  assert.notEqual(end, -1, `expected to find ${endMarker}`);
+  return source.slice(start, end);
+}
+
+async function withTempDirectory(run) {
+  const root = await mkdtemp(path.join(tmpdir(), "codex-injector-test-"));
+  try {
+    return await run(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function fakeProcess(overrides = {}) {
+  return {
+    pid: process.pid,
+    getuid: typeof process.getuid === "function" ? () => process.getuid() : undefined,
+    env: {},
+    ...overrides,
+  };
+}
+
+test("ensureOwnedPrivateDirectory creates a private 0700 directory on first use", async () => {
+  const fnSource = extractSource(
+    "async function ensureOwnedPrivateDirectory",
+    "async function loadOrCreateCodexProfileDirectoryName",
+  );
+  const ensureOwnedPrivateDirectory = vm.runInNewContext(`(${fnSource})`, {
+    lstat,
+    mkdir,
+    process: fakeProcess(),
+  });
+
+  await withTempDirectory(async (root) => {
+    const target = path.join(root, "codex-profile-abc123");
+    const result = await ensureOwnedPrivateDirectory(target);
+    assert.equal(result, target);
+    const info = await lstat(target);
+    assert.equal(info.isDirectory(), true);
+    assert.equal(info.mode & 0o777, 0o700);
+  });
+});
+
+test("ensureOwnedPrivateDirectory rejects a pre-planted symlink at the profile path", async () => {
+  const fnSource = extractSource(
+    "async function ensureOwnedPrivateDirectory",
+    "async function loadOrCreateCodexProfileDirectoryName",
+  );
+  const ensureOwnedPrivateDirectory = vm.runInNewContext(`(${fnSource})`, {
+    lstat,
+    mkdir,
+    process: fakeProcess(),
+  });
+
+  await withTempDirectory(async (root) => {
+    const target = path.join(root, "codex-profile-abc123");
+    await symlink(path.join(root, "attacker-controlled-target"), target);
+    await assert.rejects(
+      () => ensureOwnedPrivateDirectory(target),
+      /symlink/,
+    );
+  });
+});
+
+test("ensureOwnedPrivateDirectory rejects a pre-existing directory with loose permissions", async () => {
+  const fnSource = extractSource(
+    "async function ensureOwnedPrivateDirectory",
+    "async function loadOrCreateCodexProfileDirectoryName",
+  );
+  const ensureOwnedPrivateDirectory = vm.runInNewContext(`(${fnSource})`, {
+    lstat,
+    mkdir,
+    process: fakeProcess(),
+  });
+
+  await withTempDirectory(async (root) => {
+    const target = path.join(root, "codex-profile-abc123");
+    await mkdir(target, { mode: 0o700 });
+    await chmod(target, 0o755);
+    await assert.rejects(
+      () => ensureOwnedPrivateDirectory(target),
+      /permissions/,
+    );
+  });
+});
+
+test("loadOrCreateCodexProfileDirectoryName persists a stable random name across restarts", async () => {
+  const fnSource = extractSource(
+    "async function loadOrCreateCodexProfileDirectoryName",
+    "async function computeIndependentCodexProfilePath",
+  );
+  await withTempDirectory(async (taskboardDataDirectory) => {
+    const context = {
+      path,
+      readFile,
+      writeFile,
+      rename,
+      randomBytes,
+      process: fakeProcess(),
+      codexProfileDirectoryNamePattern: /^[a-f0-9]{32}$/,
+      taskboardDataDirectory,
+    };
+    const loadOrCreateCodexProfileDirectoryName = vm.runInNewContext(`(${fnSource})`, context);
+    const first = await loadOrCreateCodexProfileDirectoryName();
+    assert.match(first, /^[a-f0-9]{32}$/);
+    const metadata = JSON.parse(
+      await readFile(path.join(taskboardDataDirectory, "codex-profile-directory.json"), "utf8"),
+    );
+    assert.equal(metadata.directoryName, first);
+
+    const second = await loadOrCreateCodexProfileDirectoryName();
+    assert.equal(second, first);
+  });
+});
+
+test("computeIndependentCodexProfilePath refuses a symlinked private data directory", async () => {
+  const blobSource = extractSource(
+    "const codexProfileDirectoryNamePattern",
+    "let independentCodexProfilePathPromise = null;",
+  );
+  await withTempDirectory(async (root) => {
+    const taskboardDataDirectory = path.join(root, "app-data");
+    await symlink(path.join(root, "attacker-controlled-target"), taskboardDataDirectory);
+    const context = {
+      lstat,
+      mkdir,
+      path,
+      readFile,
+      writeFile,
+      rename,
+      randomBytes,
+      process: fakeProcess(),
+      taskboardDataDirectory,
+    };
+    const computeIndependentCodexProfilePath = vm.runInNewContext(
+      `(() => { ${blobSource}\nreturn computeIndependentCodexProfilePath; })()`,
+      context,
+    );
+    await assert.rejects(
+      () => computeIndependentCodexProfilePath(),
+      /symlink/,
+    );
+  });
+});
+
+test("computeIndependentCodexProfilePath refuses a pre-planted symlink at an explicit override path", async () => {
+  const blobSource = extractSource(
+    "const codexProfileDirectoryNamePattern",
+    "let independentCodexProfilePathPromise = null;",
+  );
+  await withTempDirectory(async (root) => {
+    const overridePath = path.join(root, "operator-chosen-profile");
+    await symlink(path.join(root, "attacker-controlled-target"), overridePath);
+    const context = {
+      lstat,
+      mkdir,
+      path,
+      readFile,
+      writeFile,
+      rename,
+      randomBytes,
+      process: fakeProcess({ env: { CODEX_TASKBOARD_CODEX_PROFILE: overridePath } }),
+      taskboardDataDirectory: path.join(root, "app-data"),
+    };
+    const computeIndependentCodexProfilePath = vm.runInNewContext(
+      `(() => { ${blobSource}\nreturn computeIndependentCodexProfilePath; })()`,
+      context,
+    );
+    await assert.rejects(
+      () => computeIndependentCodexProfilePath(),
+      /symlink/,
+    );
+  });
 });

@@ -12,8 +12,8 @@
 
 ## 3. database.mjs 附加 capabilities 到 task/project 回傳物件
 
-- [ ] 3.1 `server/database.mjs` 在組裝 task 回傳物件（含 `row.external_source === "jira" ? "jira" : "local"` 映射邏輯所在處）與 project 回傳物件（含 `row.id === JIRA_PROJECT_ID ? "jira" : "local"` 映射邏輯所在處）時，各自呼叫 `getProviderCapabilities(source)` 並附加為 `capabilities` 欄位——這是設計決策「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」的後端前置步驟，capabilities 的定義權留在後端 registry。驗證：新增測試確認回傳的 task/project 物件皆含正確的 `capabilities` 欄位，且既有的 `source` 欄位值與計算方式維持不變。
-- [ ] 3.2 [P] 執行 `npm test`，確認新增欄位不破壞任何既有斷言（若既有測試對 task/project 物件做深度相等比對而未預期新欄位，需要更新該測試的預期值以包含 `capabilities`，但不得刪除或放寬其原有斷言範圍）。
+- [x] 3.1 `server/database.mjs` 在組裝 task 回傳物件（含 `row.external_source === "jira" ? "jira" : "local"` 映射邏輯所在處）與 project 回傳物件（含 `row.id === JIRA_PROJECT_ID ? "jira" : "local"` 映射邏輯所在處）時，各自呼叫 `getProviderCapabilities(source)` 並附加為 `capabilities` 欄位——這是設計決策「前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry」的後端前置步驟，capabilities 的定義權留在後端 registry。驗證：新增測試確認回傳的 task/project 物件皆含正確的 `capabilities` 欄位，且既有的 `source` 欄位值與計算方式維持不變。
+- [x] 3.2 [P] 執行 `npm test`，確認新增欄位不破壞任何既有斷言（若既有測試對 task/project 物件做深度相等比對而未預期新欄位，需要更新該測試的預期值以包含 `capabilities`，但不得刪除或放寬其原有斷言範圍）。
 
 ## 4. 移除 server/app.mjs 的字面 source 判斷
 

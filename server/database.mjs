@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { DEFAULT_LABEL_NAMES, JIRA_PROJECT_ID } from "../shared/domain.mjs";
-import { getProviderCapabilities } from "./provider-registry.mjs";
+import { getProvider, getProviderCapabilities } from "./provider-registry.mjs";
 
 const DEFAULT_PROJECT_LABELS_JSON = JSON.stringify(DEFAULT_LABEL_NAMES);
 const TASK_TREE_MAX_NODES = 1_000;
@@ -264,6 +264,7 @@ function taskFromRow(row) {
       : null,
     source,
     capabilities: getProviderCapabilities(source),
+    isProviderManaged: getProvider(source) !== null,
     externalOrigin: row.external_origin ?? null,
     externalKey: row.external_key ?? null,
     externalUrl: row.external_url ?? null,
@@ -353,6 +354,7 @@ function projectFromRow(row) {
     workspacePath: row.workspace_path,
     source,
     capabilities: getProviderCapabilities(source),
+    isProviderManaged: getProvider(source) !== null,
     labels: JSON.parse(row.labels),
     issueCount: Number(row.issue_count ?? 0),
     createdAt: row.created_at,

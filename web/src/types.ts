@@ -354,6 +354,7 @@ export interface Project {
   workspacePath: string | null;
   source: "local" | "jira";
   capabilities: ProviderCapabilities;
+  isProviderManaged: boolean;
   labels: string[];
   issueCount: number;
   createdAt: string;
@@ -447,6 +448,7 @@ export interface Task {
   recurrence: Recurrence | null;
   source: "local" | "jira";
   capabilities: ProviderCapabilities;
+  isProviderManaged: boolean;
   externalOrigin?: string | null;
   externalKey?: string | null;
   externalUrl: string | null;

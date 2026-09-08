@@ -66,6 +66,7 @@ function buildTask(capabilities: ProviderCapabilities): Task {
     recurrence: null,
     source: capabilities.assigneeEdit ? "local" : "jira",
     capabilities,
+    isProviderManaged: !capabilities.assigneeEdit,
     externalOrigin: null,
     externalKey: null,
     externalUrl: null,

@@ -73,10 +73,12 @@ test("taskFromRow attaches local default capabilities to a local task without ch
 
     assert.equal(task.source, "local");
     assert.deepEqual(task.capabilities, getProviderCapabilities(null));
+    assert.equal(task.isProviderManaged, false);
 
     const fetched = fixture.database.getTask(task.id);
     assert.equal(fetched.source, "local");
     assert.deepEqual(fetched.capabilities, getProviderCapabilities(null));
+    assert.equal(fetched.isProviderManaged, false);
   } finally {
     await fixture.close();
   }
@@ -92,6 +94,7 @@ test("taskFromRow attaches the jira provider's capabilities to a jira-sourced ta
     assert.equal(task.source, "jira");
     assert.deepEqual(task.capabilities, getProviderCapabilities("jira"));
     assert.notDeepEqual(task.capabilities, getProviderCapabilities(null));
+    assert.equal(task.isProviderManaged, true);
   } finally {
     await fixture.close();
   }
@@ -108,10 +111,12 @@ test("projectFromRow attaches local default capabilities to a local project with
 
     assert.equal(created.source, "local");
     assert.deepEqual(created.capabilities, getProviderCapabilities(null));
+    assert.equal(created.isProviderManaged, false);
 
     const fetched = fixture.database.getProject("capabilities-local-project");
     assert.equal(fetched.source, "local");
     assert.deepEqual(fetched.capabilities, getProviderCapabilities(null));
+    assert.equal(fetched.isProviderManaged, false);
   } finally {
     await fixture.close();
   }
@@ -126,6 +131,7 @@ test("projectFromRow attaches the jira provider's capabilities to the jira proje
     assert.equal(project.source, "jira");
     assert.deepEqual(project.capabilities, getProviderCapabilities("jira"));
     assert.notDeepEqual(project.capabilities, getProviderCapabilities(null));
+    assert.equal(project.isProviderManaged, true);
   } finally {
     await fixture.close();
   }

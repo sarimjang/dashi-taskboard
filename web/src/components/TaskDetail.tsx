@@ -1769,7 +1769,7 @@ export function TaskDetail({
                 onOpenChange={(open) => setPropertyMenu(open ? "labels" : null)}
                 onChange={(nextLabels) => void saveTask({ labels: nextLabels }, "labels")}
                 onCreateLabel={onCreateLabel}
-                onDeleteLabel={currentTask.source === "jira" ? undefined : onDeleteLabel}
+                onDeleteLabel={currentTask.isProviderManaged ? undefined : onDeleteLabel}
               />
             </div>
             <div className="detail-property-row development-property">

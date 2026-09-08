@@ -31,6 +31,6 @@
 
 ## 6. 假 provider 驗收測試與收尾
 
-- [ ] 6.1 新增一個測試專用的假 provider（僅存在於測試檔案內，不對外暴露路由或設定介面），註冊進 provider registry 並宣告與 Jira 不同的 capabilities 組合（例如 `manualDelete: true`），驗證「新增一個假的 provider 不需要修改 UI 條件判斷即可宣告能力」這項完成判準與規格要求「New provider requires zero UI conditional changes」成立。驗證：新增測試確認前端元件（或元件測試中模擬的資料）在收到該假 provider 的 task 資料時，UI disabled 狀態正確反映其 capabilities，且該測試的建立過程未修改任何一個前端元件的條件判斷式（只在測試資料的 capabilities 欄位帶入不同值）。
-- [ ] 6.2 全 repo（含 `server/`、`web/src/`、`cli/`）執行 `grep -rn 'source === "jira"\|source !== "jira"'`，確認 design.md Implementation Contract 驗收判準第 1 項與規格要求「Provider capabilities SHALL be explicitly declared, not inferred from source string comparison」成立（零殘留，資料庫欄位映射定義處除外）。
-- [ ] 6.3 執行完整 `npm test`（全數通過）、`npm run typecheck`（若存在，乾淨）、`npm run build:web`（乾淨），並在 handoff 中列出與變更前的 baseline 測試數比對，確認無既有測試被刪除或跳過（除已知的既有 skip 案例外）。
+- [x] 6.1 新增一個測試專用的假 provider（僅存在於測試檔案內，不對外暴露路由或設定介面），註冊進 provider registry 並宣告與 Jira 不同的 capabilities 組合（例如 `manualDelete: true`），驗證「新增一個假的 provider 不需要修改 UI 條件判斷即可宣告能力」這項完成判準與規格要求「New provider requires zero UI conditional changes」成立。驗證：新增測試確認前端元件（或元件測試中模擬的資料）在收到該假 provider 的 task 資料時，UI disabled 狀態正確反映其 capabilities，且該測試的建立過程未修改任何一個前端元件的條件判斷式（只在測試資料的 capabilities 欄位帶入不同值）。
+- [x] 6.2 全 repo（含 `server/`、`web/src/`、`cli/`）執行 `grep -rn 'source === "jira"\|source !== "jira"'`，確認 design.md Implementation Contract 驗收判準第 1 項與規格要求「Provider capabilities SHALL be explicitly declared, not inferred from source string comparison」成立（零殘留，資料庫欄位映射定義處除外）。
+- [x] 6.3 執行完整 `npm test`（全數通過）、`npm run typecheck`（若存在，乾淨）、`npm run build:web`（乾淨），並在 handoff 中列出與變更前的 baseline 測試數比對，確認無既有測試被刪除或跳過（除已知的既有 skip 案例外）。

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest } from "node:http";
+import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 
 import { createTaskboardServer, resolveHost, resolveServerOptions } from "../server/index.mjs";
 
@@ -593,69 +593,6 @@ test("an authenticated LAN client succeeds over HTTP and SSE while an unauthenti
   assert.equal(sseResult.status, 200);
 });
 
-test("cloud WebSocket upgrades stay loopback-only even for an authenticated LAN client", async (t) => {
-  const lanAddress = privateLanAddress();
-  if (!lanAddress) {
-    t.skip("No private LAN interface is available");
-    return;
-  }
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-lan-ws-test-"));
-  const upstreamServer = createServer();
-  const upstreamWebSockets = new WebSocketServer({ noServer: true });
-  upstreamServer.on("upgrade", (request, socket, head) => {
-    upstreamWebSockets.handleUpgrade(request, socket, head, () => {});
-  });
-  await new Promise((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
-  const upstreamAddress = upstreamServer.address();
-  const instanceToken = "4d8f2a6c-9b1e-4d7a-8f2c-6b9e1d4a7f80";
-  const instanceSecret = "2b6e9c4a-7d1f-4a8e-9c6b-1e4a7d2f9c50-2b6e9c4a7d1f4a8e";
-  const app = createTaskboardServer({
-    dataDirectory: directory,
-    instanceToken,
-    instanceSecret,
-    processEnv: { ...process.env, CODEX_TASKBOARD_ALLOW_LAN: "1" },
-    cloudConfigStore: {
-      async read() {
-        return {
-          remoteUrl: `http://127.0.0.1:${upstreamAddress.port}`,
-          actorName: "Test actor",
-          sharedKey: "test-shared-key",
-        };
-      },
-    },
-  });
-  const address = await app.listen({ host: "0.0.0.0", port: 0 });
-
-  try {
-    // No instance-token prefix: hidden behind the same route-prefix bearer
-    // credential as every other route (404, matching the HTTP/SSE behavior).
-    const unauthenticatedStatus = await openWebSocket(
-      `ws://${lanAddress}:${address.port}/api/events`,
-      { host: `${lanAddress}:${address.port}` },
-    );
-    assert.equal(unauthenticatedStatus, 404);
-
-    // LAN+token must not open the cloud-relay WS; HTTP/SSE deny the same caller.
-    const authenticatedLanStatus = await openWebSocket(
-      `ws://${lanAddress}:${address.port}/${instanceToken}/api/events`,
-      { host: `${lanAddress}:${address.port}` },
-    );
-    assert.equal(authenticatedLanStatus, 403);
-
-    // Loopback with the same token still succeeds.
-    const authenticatedLoopbackStatus = await openWebSocket(
-      `ws://127.0.0.1:${address.port}/${instanceToken}/api/events`,
-      { host: `127.0.0.1:${address.port}` },
-    );
-    assert.equal(authenticatedLoopbackStatus, 101);
-  } finally {
-    await app.close();
-    upstreamWebSockets.close();
-    await new Promise((resolve) => upstreamServer.close(resolve));
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 test("machine-level metadata and capability routes stay loopback-only even for an authenticated LAN client", async (t) => {
   const lanAddress = privateLanAddress();
   if (!lanAddress) {
@@ -760,38 +697,17 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
     return {
       skillPath,
       processEnv: { ...process.env, CODEX_TASKBOARD_TRUSTED_ORIGINS: trustedOrigin },
-      cloudConfigStore: {
-        async read() {
-          return {
-            remoteUrl: "https://tasks.example.test",
-            actorName: "Test actor",
-            sharedKey: "test-shared-key",
-            projectMappings: {},
-          };
-        },
-      },
-      remoteFetch: async () => new Response(JSON.stringify({ projects: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
     };
   });
   const trustedRequest = { headers: { origin: trustedOrigin } };
 
   const projects = await request(baseUrl, "/api/projects", trustedRequest);
   assert.equal(projects.response.status, 200);
-  assert.deepEqual(projects.body, { projects: [] });
 
   const metadata = await request(baseUrl, "/api/meta", trustedRequest);
   assert.equal(metadata.response.status, 200);
   assert.deepEqual(metadata.body, {
     capabilities: { localAiChat: false },
-    mode: "cloud",
-    realtime: {
-      transport: "websocket",
-      endpoint: "/api/events",
-    },
-    localCapabilities: { available: false },
   });
   assert.equal(Object.hasOwn(metadata.body, "manageTaskboardSkillPath"), false);
 
@@ -812,58 +728,9 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
   assert.deepEqual(localMetadata.body, {
     manageTaskboardSkillPath: skillPath,
     capabilities: { localAiChat: true },
-    mode: "cloud",
-    realtime: {
-      transport: "websocket",
-      endpoint: "/api/events",
-    },
-    localCapabilities: { available: true },
   });
   assert.equal((await request(baseUrl, "/api/local/host-runtime")).response.status, 200);
   assert.equal((await request(baseUrl, "/api/device-workspaces")).response.status, 200);
-});
-
-test("trusted HTTPS origins apply to cloud WebSocket upgrades without widening loopback routes", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-trusted-origins-"));
-  const trustedOrigin = "https://board.example.test";
-  const upstreamServer = createServer();
-  const upstreamWebSockets = new WebSocketServer({ noServer: true });
-  upstreamServer.on("upgrade", (request, socket, head) => {
-    upstreamWebSockets.handleUpgrade(request, socket, head, () => {});
-  });
-  await new Promise((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
-  const upstreamAddress = upstreamServer.address();
-  const app = createTaskboardServer({
-    dataDirectory: directory,
-    processEnv: { ...process.env, CODEX_TASKBOARD_TRUSTED_ORIGINS: trustedOrigin },
-    cloudConfigStore: {
-      async read() {
-        return {
-          remoteUrl: `http://127.0.0.1:${upstreamAddress.port}`,
-          actorName: "Test actor",
-          sharedKey: "test-shared-key",
-        };
-      },
-    },
-  });
-  const address = await app.listen({ host: "127.0.0.1", port: 0 });
-
-  try {
-    const url = `ws://127.0.0.1:${address.port}/api/events`;
-    for (const [origin, expectedStatus] of [
-      [trustedOrigin, 101],
-      ["https://other.example.test", 403],
-      [undefined, 101],
-    ]) {
-      const headers = { host: "127.0.0.1", ...(origin ? { origin } : {}) };
-      assert.equal(await openWebSocket(url, headers), expectedStatus);
-    }
-  } finally {
-    await app.close();
-    upstreamWebSockets.close();
-    await new Promise((resolve) => upstreamServer.close(resolve));
-    await rm(directory, { recursive: true, force: true });
-  }
 });
 
 test("trusted origin configuration rejects non-origin URLs", () => {

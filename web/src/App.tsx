@@ -3221,7 +3221,7 @@ export function App() {
   return (
     <TaskboardLanguageProvider language={language}>
       <div className={`app-shell${embedded ? " embedded" : ""}`} style={appShellStyle}>
-      {taskboardMetadata && taskboardMetadata.mode !== "cloud" && (
+      {taskboardMetadata && (
         <LocalRealtimeSync
           selectedProjectId={taskScopeProjectId}
           detailTaskId={detailTaskId}

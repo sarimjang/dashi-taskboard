@@ -517,7 +517,7 @@ export function TaskCard({
               task={task}
               participants={task.participants.length ? task.participants : [creator]}
               currentUser={currentUser}
-              disabled={propertyDisabled || task.source === "jira"}
+              disabled={propertyDisabled || !task.capabilities.assigneeEdit}
               open={propertyMenu === "assignee"}
               onOpenChange={(open) => setPropertyMenu(open ? "assignee" : null)}
               onChange={(assigneeTarget) => updateProperty({ assigneeTarget }, "assignee")}
@@ -581,7 +581,7 @@ export function TaskCard({
               task={task}
               participants={task.participants}
               currentUser={currentUser}
-              disabled={propertyDisabled || task.source === "jira"}
+              disabled={propertyDisabled || !task.capabilities.assigneeEdit}
               open={propertyMenu === "assignee"}
               onOpenChange={(open) => setPropertyMenu(open ? "assignee" : null)}
               onChange={(assigneeTarget) => updateProperty({ assigneeTarget }, "assignee")}

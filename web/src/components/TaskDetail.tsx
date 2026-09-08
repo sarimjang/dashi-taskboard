@@ -1738,7 +1738,7 @@ export function TaskDetail({
                   icon: <ActorAvatar actor={actor} className="task-property-assignee-avatar" />,
                 }))}
                 open={propertyMenu === "assignee"}
-                disabled={currentTask.source === "jira" || savingProperty === "assignee"}
+                disabled={!currentTask.capabilities.assigneeEdit || savingProperty === "assignee"}
                 className="detail-property-picker"
                 triggerClassName="detail-property-trigger"
                 ariaLabel={text("负责人", "Assignee")}

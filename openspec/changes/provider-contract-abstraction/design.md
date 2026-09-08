@@ -34,6 +34,8 @@ architect.md 原始的 `ProviderCapabilities` 是給「provider 本身」的能�
 
 `server/database.mjs` 讀出的 `row.external_source`（資料庫既有欄位值，如 `"jira"`）當作 registry 的查表 key，不改變資料庫欄位本身的字面值（維持向後相容，change 2 已確立的 schema 不變原則）。新增 `server/provider-registry.mjs`，匯出 `getProviderCapabilities(source: string | null): ProviderCapabilities`（`source` 為 `null` 或未註冊值時回傳 local-only 的預設能力：全部 mutation 能力為 `true`，因為本機 task 什麼都能改）與 `getProvider(source: string): IssueProvider | null`。呼叫端（`app.mjs`/`database.mjs`/前端）一律透過這兩個函式查詢，不再自行字面比對。
 
+> **§1 執行後校正（獨立審查 pca-group1-review 發現，非阻斷，PM 已拍板）**：本段文字「全部 mutation 能力為 `true`」逐字所指的是下段新增的 5 個 task-mutation 位元（`manualArchive`/`manualDelete`/`manualMove`/`assigneeEdit`/`projectReassign`），未明確規定 `webhook`/`incrementalSync`（provider 整體同步機制宣告）與 `comments`/`attachments`/`relations`（三值列舉）這 5 個欄位的 local 預設值。§1 實作採用「所有欄位一律取值域最大值」（9 個 boolean 皆 `true`、3 個列舉皆 `"read-write"`）作為合理外推，已獨立審查確認無反例、且本輪尚未有任何 consumer 讀取這些欄位（零行為影響半徑）。PM 決定：**維持此實作，作為本 change 對 local 預設值的正式定義**，不要求 §1 返工。§2/§3 的 apply-executor 開始消費這些欄位時，以此為準，不需重新拍板。
+
 ### 前端透過一個新的共用 API 欄位取得 capabilities，不在前端重建 registry
 
 後端在回傳 task/project JSON 時新增 `capabilities: ProviderCapabilities` 欄位（透過 `getProviderCapabilities` 計算），前端元件（TaskCard/IssueListView/TaskDetail/App.tsx）改讀 `task.capabilities.assigneeEdit`/`task.capabilities.manualDelete` 等，取代 `task.source === "jira"`。理由：capabilities 的定義權應該在後端（provider registry 所在處），前端不應該重複維護一份「source 字串對應哪些能力」的邏輯，否則前後端會再度出現本次要移除的那種散落判斷。
@@ -43,12 +45,14 @@ architect.md 原始的 `ProviderCapabilities` 是給「provider 本身」的能�
 **行為（不變）**：Jira task 的既有限制邏輯 100% 保持——不能手動歸檔/刪除/移動/改指派人/改 projectId，PATCH 時仍會呼叫 `jira.updateTask`，move 時仍會呼叫 `jira.moveTask`，寫入失敗時仍會呼叫 `jira.reconcile` 並在失敗時回傳 `JIRA_RECONCILE_FAILED`。本機 task 的既有自由度 100% 保持。
 
 **介面/資料形狀**：
+
 - `server/provider-registry.mjs` 匯出 `getProviderCapabilities(source)` 與 `getProvider(source)`，兩者皆為同步函式（不做任何 I/O）。
 - `ProviderCapabilities` 型別擴充 architect.md 原稿，新增 `manualArchive: boolean`、`manualDelete: boolean`、`manualMove: boolean`、`assigneeEdit: boolean`、`projectReassign: boolean` 五個欄位，與原稿的 `createIssue`/`updateAssignee`/`comments`/`attachments`/`relations`/`webhook`/`incrementalSync` 並列於同一物件。
 - `server/jira-integration.mjs` 的 `createJiraIntegration` 回傳物件新增 `capabilities: ProviderCapabilities` 屬性（靜態值，不隨呼叫變動）。
 - API 回應（`GET /api/tasks/:id`、task 列表、task.updated/created/moved 等事件 payload 中的 task 物件）新增 `capabilities` 欄位。
 
 **驗收判準**：
+
 1. 對 `server/database.mjs`、`server/app.mjs`、`web/src/App.tsx`、`web/src/components/TaskCard.tsx`、`web/src/components/IssueListView.tsx`、`web/src/components/TaskDetail.tsx` 全 repo grep `source === "jira"` 與 `source !== "jira"`，結果應為零筆（`server/database.mjs` 內部把資料庫欄位值轉換成 `source` 欄位本身的那一行映射邏輯除外，因為那是定義 `source` 的來源、不是消費端判斷）。
 2. 新增一個測試專用的假 provider（不對外暴露路由或設定介面，僅供 `npm test` 內部驗證 registry 機制），將其註冊進 registry 並宣告與 Jira 不同的 capabilities 組合，驗證前端元件（或元件測試中模擬的資料）在收到該假 provider 的 task 資料時，UI disabled 狀態正確反映其 capabilities，且過程中不需要修改任何一個前端條件判斷式（只需要在測試資料的 capabilities 欄位帶入不同值）。
 3. `npm test` 全綠，且既有涵蓋 Jira 同步行為的測試案例（`test/server.test.mjs` 等）逐項通過、斷言內容不變（除非斷言本身依賴的是即將移除的 `source === "jira"` 實作細節而非外部可觀察行為，此類斷言可以改寫，但改寫後驗證的可觀察行為必須與改寫前等價）。
@@ -67,6 +71,7 @@ architect.md 原始的 `ProviderCapabilities` 是給「provider 本身」的能�
 ## Migration Plan
 
 分階段實作，每階段可獨立驗證：
+
 1. 新增 `server/provider-registry.mjs` 與擴充後的 `ProviderCapabilities` 型別/JSDoc 定義，此階段不改動任何既有呼叫端，`npm test` 應仍全綠（純新增，無行為改變）。
 2. `server/jira-integration.mjs` 的 `createJiraIntegration` 回傳物件新增 `capabilities` 屬性，`server/database.mjs` 新增透過 registry 查詢 capabilities 並附加到 task/project 回傳物件的邏輯，但先不移除既有的 `source === "jira"` 判斷（新舊並存），驗證新欄位輸出正確。
 3. 逐一將 `server/app.mjs` 的 5 處判斷、`web/src/App.tsx` 的 `isJiraProject`、三個前端元件的 disabled 判斷改為讀取 `capabilities`，每改一處立即跑對應測試，改完全部後執行驗收判準第 1 項的全 repo grep 確認零殘留。

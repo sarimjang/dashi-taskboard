@@ -1,8 +1,8 @@
 ## 1. Provider registry 骨架（新增，不改動既有呼叫端）
 
-- [ ] 1.1 新增 `server/provider-registry.mjs`，匯出 `getProviderCapabilities(source)`（source 為 `null`/未註冊值時回傳 local 預設能力，全部 mutation 欄位為 `true`）與 `getProvider(source)`（未註冊時回傳 `null`）——落實設計決策「provider registry 用 `source` 字串做 key，registry 本身不對外暴露 `source` 字面比對」，實現規格要求「Provider capabilities SHALL be explicitly declared, not inferred from source string comparison」。驗證：新增單元測試涵蓋「已註冊 source」「未註冊 source」「null source」三種輸入各自的回傳值。
-- [ ] 1.2 定義擴充後的 `ProviderCapabilities` 型別/JSDoc（`createIssue`/`updateAssignee`/`comments`/`attachments`/`relations`/`webhook`/`incrementalSync`/`manualArchive`/`manualDelete`/`manualMove`/`assigneeEdit`/`projectReassign` 十二個欄位）——落實設計決策「擴充 ProviderCapabilities 涵蓋 task-mutation 層級的能力位元」。驗證：`npm run typecheck`（若存在）乾淨，或以型別測試/JSDoc 型別檢查工具確認欄位齊全。
-- [ ] 1.3 [P] 執行 `npm test`，確認新增模組不影響既有測試（純新增，此階段 `npm test` 結果應與變更前完全一致）。
+- [x] 1.1 新增 `server/provider-registry.mjs`，匯出 `getProviderCapabilities(source)`（source 為 `null`/未註冊值時回傳 local 預設能力，全部 mutation 欄位為 `true`）與 `getProvider(source)`（未註冊時回傳 `null`）——落實設計決策「provider registry 用 `source` 字串做 key，registry 本身不對外暴露 `source` 字面比對」，實現規格要求「Provider capabilities SHALL be explicitly declared, not inferred from source string comparison」。驗證：新增單元測試涵蓋「已註冊 source」「未註冊 source」「null source」三種輸入各自的回傳值。
+- [x] 1.2 定義擴充後的 `ProviderCapabilities` 型別/JSDoc（`createIssue`/`updateAssignee`/`comments`/`attachments`/`relations`/`webhook`/`incrementalSync`/`manualArchive`/`manualDelete`/`manualMove`/`assigneeEdit`/`projectReassign` 十二個欄位）——落實設計決策「擴充 ProviderCapabilities 涵蓋 task-mutation 層級的能力位元」。驗證：`npm run typecheck`（若存在）乾淨，或以型別測試/JSDoc 型別檢查工具確認欄位齊全。
+- [x] 1.3 [P] 執行 `npm test`，確認新增模組不影響既有測試（純新增，此階段 `npm test` 結果應與變更前完全一致）。
 
 ## 2. Jira provider 實作 IssueProvider 介面（新舊並存）
 

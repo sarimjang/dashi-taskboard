@@ -29,6 +29,7 @@ import {
   resolvePersistedAttachmentUrl,
 } from "../api";
 import { useTaskboardI18n } from "../i18n";
+import { classifyMediaUrl } from "../mediaAccessPolicy";
 import { readIssueIdentifier } from "../issueRoute";
 import { STATUS_DETAILS } from "./BoardColumn";
 import { clipboardImages, fileKey, MAX_ATTACHMENT_SIZE } from "./PendingAttachments";
@@ -841,6 +842,9 @@ function PersistedImageBlock({
   onRemove: () => void;
 }) {
   const { text } = useTaskboardI18n();
+  const resolvedUrl = resolvePersistedAttachmentUrl(segment.url);
+  const decision = useMemo(() => classifyMediaUrl(resolvedUrl), [resolvedUrl]);
+  const [revealed, setRevealed] = useState(false);
 
   return (
     <figure
@@ -848,7 +852,29 @@ function PersistedImageBlock({
       contentEditable={false}
       data-inline-media-segment={segment.id}
     >
-      <img src={resolvePersistedAttachmentUrl(segment.url)} alt={segment.alt} draggable={false} />
+      {decision === "blocked" ? (
+        <span
+          className="inline-media-image-gate is-blocked"
+          role="img"
+          aria-label={text(
+            "已阻止加载指向内部网络地址的图片",
+            "Blocked an image pointing at an internal network address",
+          )}
+        >
+          {text("图片已阻止", "Image blocked")}
+        </span>
+      ) : decision === "external" && !revealed ? (
+        <button
+          type="button"
+          className="inline-media-image-gate"
+          disabled={disabled}
+          onClick={() => setRevealed(true)}
+        >
+          {text("点击加载外部图片", "Click to load external image")}
+        </button>
+      ) : (
+        <img src={resolvedUrl} alt={segment.alt} draggable={false} />
+      )}
       <button
         type="button"
         disabled={disabled}

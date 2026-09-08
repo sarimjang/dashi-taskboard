@@ -23,7 +23,8 @@
 
 ## 4. 測試與文件收尾
 
-- [ ] 4.1 移除或改寫 `test/cloud-shared-worker.test.mjs`、`test/cloud-companion.test.mjs`、`test/server.test.mjs` 裡測試雲端代理轉發行為的案例，改為測試端點已退場（404）——驗證方式：`npm test` 全綠，且這三個測試檔案裡不再有任何斷言雲端代理成功轉發的案例
-- [ ] 4.2 [P] 移除 `docs/cloud-collaboration.md`，並在 README 或對應文件補上共享雲端看板功能已退場、資料可透過遷移子指令匯出的說明——驗證方式：`docs/cloud-collaboration.md` 已不存在，且對應文件包含上述說明文字
-- [ ] 4.3 [P] 移除 `cli/taskctl.mjs` 依賴 `normalizeCloudUrl` 的 cloud-configure 子指令——驗證方式：`taskctl --help`（或等效指令）的輸出不再列出 cloud-configure 子指令，且 `npm test` 中對應的舊測試已同步移除
-  - **部分已完成（§3，commit 925708a，被迫非選擇）**：`cloud login`/`cloud status`/`cloud logout` 子指令與 `normalizeCloudUrl` import 已移除（`taskctl --help` 已確認不再列出）——其依賴的 `/api/local/cloud-session` 路由已在 3.2 隨之刪除，留著只會打一個永遠 404 的端點。**尚未完成**：`test/cloud-companion.test.mjs` 裡呼叫 `runCli(["cloud","status"|"login"|"logout"|...])`/`runCli(["project","map",...])` 的舊測試案例（目前計入 §3 已知的 23 個預期內失敗）尚未同步移除——這是本項驗證方式明確要求的「`npm test` 中對應的舊測試已同步移除」，仍待本節完成。
+- [x] 4.1 移除或改寫 `test/cloud-shared-worker.test.mjs`、`test/cloud-companion.test.mjs`、`test/server.test.mjs` 裡測試雲端代理轉發行為的案例，改為測試端點已退場（404）——驗證方式：`npm test` 全綠，且這三個測試檔案裡不再有任何斷言雲端代理成功轉發的案例
+- [x] 4.2 [P] 移除 `docs/cloud-collaboration.md`，並在 README 或對應文件補上共享雲端看板功能已退場、資料可透過遷移子指令匯出的說明——驗證方式：`docs/cloud-collaboration.md` 已不存在，且對應文件包含上述說明文字
+- [x] 4.3 [P] 移除 `cli/taskctl.mjs` 依賴 `normalizeCloudUrl` 的 cloud-configure 子指令——驗證方式：`taskctl --help`（或等效指令）的輸出不再列出 cloud-configure 子指令，且 `npm test` 中對應的舊測試已同步移除
+  - **部分已完成（§3，commit 925708a，被迫非選擇）**：`cloud login`/`cloud status`/`cloud logout` 子指令與 `normalizeCloudUrl` import 已移除（`taskctl --help` 已確認不再列出）——其依賴的 `/api/local/cloud-session` 路由已在 3.2 隨之刪除，留著只會打一個永遠 404 的端點。
+  - **本輪完成（rsb-tests-docs）**：`test/cloud-companion.test.mjs` 裡呼叫 `runCli(["cloud","status"|"login"|"logout"|...])`/`runCli(["project","map",...])` 的舊測試案例已全數移除，詳見 `changes/retire-shared-board/handoffs/rsb-tests-docs-h1.md`。

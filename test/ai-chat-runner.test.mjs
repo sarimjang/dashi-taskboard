@@ -963,13 +963,13 @@ test("read-only AI turns are spawned with the read-only codex sandbox, not works
     await waitFor(() => fixture.service.getRun(turn.id)?.status !== "running");
 
     const captures = (await readFile(fixture.capturePath, "utf8")).trim().split("\n").map(JSON.parse);
+    // No --add-dir: resolvedWorkspace() always returns addDirectories: [] (CWE-863).
     assert.deepEqual(captures[0].args, [
       "exec", "--json", "--color", "never",
       "-C", fixture.workspace,
       "-s", "read-only",
       "-c", 'approval_policy="on-request"',
       "-c", 'approvals_reviewer="user"',
-      "--add-dir", fixture.otherWorkspace,
       "-m", "gpt-real",
       "-c", 'model_reasoning_effort="high"',
       "-",

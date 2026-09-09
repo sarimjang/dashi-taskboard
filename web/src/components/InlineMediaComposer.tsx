@@ -245,24 +245,58 @@ function base64UrlReferenceKey(
   return decoded && (!requireNfc || decoded === decoded.normalize("NFC")) ? value : null;
 }
 
+const PENDING_IMAGE_REFERENCE_CACHE_LIMIT = 20;
+const pendingImageReferenceCache = new Map<string, { file: File; dataUrl: string } | null>();
+
+function rememberPendingImageComposerReference(
+  cacheKey: string,
+  value: { file: File; dataUrl: string } | null,
+): { file: File; dataUrl: string } | null {
+  pendingImageReferenceCache.delete(cacheKey);
+  pendingImageReferenceCache.set(cacheKey, value);
+  if (pendingImageReferenceCache.size > PENDING_IMAGE_REFERENCE_CACHE_LIMIT) {
+    const oldestKey = pendingImageReferenceCache.keys().next().value;
+    if (oldestKey !== undefined) pendingImageReferenceCache.delete(oldestKey);
+  }
+  return value;
+}
+
 function pendingImageComposerReference(
   url: string,
   name: string,
 ): { file: File; dataUrl: string } | null {
+  // 以 (name, url) 為 key 快取解碼結果：避免同一個 pseudo-URL 在
+  // removeUnreferencedMentionRelations 等重複掃描路徑上被反覆解碼成新的
+  // binary/Uint8Array/File/dataUrl 副本；Map 有上限，避免快取本身變成新的無上限成長點。
+  const cacheKey = `${name} ${url}`;
+  if (pendingImageReferenceCache.has(cacheKey)) {
+    const cached = pendingImageReferenceCache.get(cacheKey)!;
+    pendingImageReferenceCache.delete(cacheKey);
+    pendingImageReferenceCache.set(cacheKey, cached);
+    return cached;
+  }
   const match = PENDING_IMAGE_COMPOSER_REFERENCE_URL.exec(url);
   const type = match ? decodedComposerReferenceKey(match[1]) : null;
-  if (!match || !type?.startsWith("image/")) return null;
+  if (!match || !type?.startsWith("image/")) {
+    return rememberPendingImageComposerReference(cacheKey, null);
+  }
+  // 概算解碼後位元組數（base64 每 4 字元對應 3 位元組），超過既有的附件大小上限
+  // 就直接視為解碼失敗，回退成一般 persisted-image/文字，不進行任何 atob/複製。
+  const approximateByteLength = (match[2].length * 3) / 4;
+  if (approximateByteLength > MAX_ATTACHMENT_SIZE) {
+    return rememberPendingImageComposerReference(cacheKey, null);
+  }
   try {
     const base64 = `${match[2].replace(/-/g, "+").replace(/_/g, "/")}${"=".repeat((4 - match[2].length % 4) % 4)}`;
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return {
+    return rememberPendingImageComposerReference(cacheKey, {
       file: new File([bytes], name || "image", { type }),
       dataUrl: `data:${type};base64,${base64}`,
-    };
+    });
   } catch {
-    return null;
+    return rememberPendingImageComposerReference(cacheKey, null);
   }
 }
 

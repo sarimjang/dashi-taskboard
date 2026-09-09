@@ -1347,3 +1347,74 @@ test("listing task comments batches attachment hydration instead of querying per
     assert.ok(!comment.attachments.some((a) => a.id === taskLevelAttachmentId));
   }
 });
+
+async function insertCommentFixtures(taskId, count, prefix) {
+  const timestamp = new Date().toISOString();
+  // A recursive CTE keeps this cap fixture to a single D1 write instead of `count` API mutations.
+  // change_revision is set to the sequence value (always > 0) so an `?after=0` cursor read sees
+  // every fixture row too — the same shape a real GET /api/tasks/:id/comments?after=0 call would.
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO comments (
+      id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
+      version, created_at, updated_at, change_revision
+    )
+    SELECT
+      ? || '-' || value,
+      ?,
+      'Comment cap fixture ' || value,
+      NULL,
+      'user',
+      'comment-cap-fixture',
+      'Comment cap fixture',
+      NULL,
+      1,
+      ?,
+      ?,
+      value
+    FROM sequence
+  `).bind(count, prefix, taskId, timestamp, timestamp).run();
+}
+
+test("GET /api/tasks/:id/comments rejects a task with more than 1,000 comments (CWE-400)", async () => {
+  await createProject("comment-list-cap");
+  const task = await createTask("comment-list-cap", "Comment list cap fixture");
+  const taskId = task.body.task.id;
+  await insertCommentFixtures(taskId, 1001, "comment-list-cap");
+
+  const result = await cloud.request(`/api/tasks/${taskId}/comments`, { actorName: alice });
+  assert.equal(result.response.status, 413);
+  assert.equal(result.body.error.code, "COMMENT_LIST_TOO_LARGE");
+});
+
+test("GET /api/tasks/:id/comments?after=0 rejects a task with more than 1,000 comments, blocking the cap bypass (CWE-400)", async () => {
+  await createProject("comment-list-cap-after-bypass");
+  const task = await createTask("comment-list-cap-after-bypass", "Comment list cap after-cursor fixture");
+  const taskId = task.body.task.id;
+  await insertCommentFixtures(taskId, 1001, "comment-list-cap-after-bypass");
+
+  // Without its own cap, listCommentsAfter would let `?after=0` read every comment unbounded,
+  // defeating the cap enforced on the no-cursor listComments() path above.
+  const result = await cloud.request(`/api/tasks/${taskId}/comments?after=0`, { actorName: alice });
+  assert.equal(result.response.status, 413);
+  assert.equal(result.body.error.code, "COMMENT_LIST_TOO_LARGE");
+});
+
+test("GET /api/tasks/:id/comments still returns comments at exactly the 1,000-comment cap", async () => {
+  await createProject("comment-list-cap-boundary");
+  const task = await createTask("comment-list-cap-boundary", "Comment list cap boundary fixture");
+  const taskId = task.body.task.id;
+  await insertCommentFixtures(taskId, 1000, "comment-list-cap-boundary");
+
+  const result = await cloud.request(`/api/tasks/${taskId}/comments`, { actorName: alice });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.comments.length, 1000);
+
+  const afterResult = await cloud.request(`/api/tasks/${taskId}/comments?after=0`, { actorName: alice });
+  assert.equal(afterResult.response.status, 200);
+  assert.equal(afterResult.body.comments.length, 1000);
+});

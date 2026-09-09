@@ -480,7 +480,7 @@ function createApiClient(overrides, {
   }
 
   const env = overrides.env ?? process.env;
-  const baseUrl = normalizeBaseUrl(explicitBaseUrl ?? DEFAULT_API_URL);
+  const baseUrl = normalizeBaseUrl(explicitBaseUrl ?? DEFAULT_API_URL, env);
 
   return {
     async request(method, pathname, body) {
@@ -1376,7 +1376,28 @@ function explicitVersion(rawVersion, { allowZero = false } = {}) {
   return version;
 }
 
-function normalizeBaseUrl(rawUrl) {
+const TASKBOARD_INSECURE_REMOTE_ENV_VAR = "CODEX_TASKBOARD_ALLOW_INSECURE_REMOTE";
+
+function isLoopbackHostname(hostname) {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host === "[::1]") return true;
+  return /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+function isInsecureRemoteAllowed(env) {
+  return String(env[TASKBOARD_INSECURE_REMOTE_ENV_VAR] ?? "").trim() === "1";
+}
+
+// Default-deny for non-loopback plaintext HTTP: a remote CODEX_TASKBOARD_URL
+// must use HTTPS unless the caller explicitly opts in. Loopback targets stay
+// plaintext-by-default (no opt-in required) because that is the documented
+// default deployment shape (main service binds 127.0.0.1; see
+// docs/planning/risk-assessment.md RISK-001) and the existing local-dev/test
+// harnesses rely on it. Mirrors the non-loopback enforcement in
+// normalizeJiraUrl (server/jira-config.mjs, bd-3-7mj/RISK-006), but jira
+// additionally requires opt-in for loopback because that path carries
+// third-party Jira credentials, not just the local instance token.
+function normalizeBaseUrl(rawUrl, env = process.env) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -1385,6 +1406,11 @@ function normalizeBaseUrl(rawUrl) {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw usageError("CODEX_TASKBOARD_URL must use http or https");
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname) && !isInsecureRemoteAllowed(env)) {
+    throw usageError(
+      `CODEX_TASKBOARD_URL must use HTTPS for non-loopback hosts (set ${TASKBOARD_INSECURE_REMOTE_ENV_VAR}=1 to override)`,
+    );
   }
   url.pathname = url.pathname.replace(/\/$/, "");
   url.search = "";

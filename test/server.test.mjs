@@ -495,9 +495,6 @@ test("Host and Origin header validation accepts private-network-looking values a
   });
   assert.equal(lanOriginResult.response.status, 200);
 
-  const localHostnameResult = await requestWithHost(baseUrl, "taskboard.local:47823");
-  assert.equal(localHostnameResult.status, 200);
-
   const hostResult = await requestWithHost(baseUrl, "taskboard.example.com");
   assert.equal(hostResult.status, 403);
   assert.equal(hostResult.body.error.code, "INVALID_HOST");
@@ -507,6 +504,27 @@ test("Host and Origin header validation accepts private-network-looking values a
   });
   assert.equal(originResult.response.status, 403);
   assert.equal(originResult.body.error.code, "INVALID_ORIGIN");
+});
+
+// CWE-346 / DNS rebinding regression (bd id: dashi-taskboard-mxg). ".local" is
+// an mDNS naming convention, not a structural guarantee of a private address
+// (unlike the 127.x/10.x/192.168.x octet checks), so an attacker who controls
+// a hostname like "evil.attacker.local" must not be able to pass this check
+// by resolving that name to an arbitrary IP (DNS rebinding) and sending it as
+// the Host/Origin header. See jira-config.test.mjs's analogous
+// "127.0.0.1.evil.com" case for the sibling bug (bd-3-7mj).
+test("Host and Origin header validation rejects attacker-controlled .local hostnames (DNS rebinding)", async () => {
+  const baseUrl = await startServer(undefined, { host: "0.0.0.0" });
+
+  const rebindHostResult = await requestWithHost(baseUrl, "evil.attacker.local:47823");
+  assert.equal(rebindHostResult.status, 403);
+  assert.equal(rebindHostResult.body.error.code, "INVALID_HOST");
+
+  const rebindOriginResult = await request(baseUrl, "/health", {
+    headers: { origin: "http://evil.attacker.local:47823" },
+  });
+  assert.equal(rebindOriginResult.response.status, 403);
+  assert.equal(rebindOriginResult.body.error.code, "INVALID_ORIGIN");
 });
 
 test("without the LAN access flag, the server only binds loopback and is unreachable from the LAN", async (t) => {

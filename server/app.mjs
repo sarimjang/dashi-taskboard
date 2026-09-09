@@ -90,9 +90,15 @@ function normalizeHostname(hostname) {
   return hostname.toLowerCase().replace(/^\[|\]$/g, "");
 }
 
+// ".local" is deliberately NOT treated as trusted here: unlike the IP-range
+// checks below, it carries no structural guarantee of pointing at a private
+// or loopback address (it's just an mDNS naming convention), so any
+// attacker-controlled hostname ending in ".local" would otherwise bypass
+// this check via DNS rebinding. See CWE-346 / bd-3-7mj for the loopback-
+// prefix analog of this same class of bug.
 function isTrustedNetworkHost(hostname) {
   const host = normalizeHostname(hostname);
-  if (host === "localhost" || host === "::1" || host.endsWith(".local")) return true;
+  if (host === "localhost" || host === "::1") return true;
   if (isIP(host) === 4) {
     const octets = host.split(".").map(Number);
     return octets[0] === 127

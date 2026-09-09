@@ -30,6 +30,7 @@ const REALTIME_HUB_NAME = "global";
 const SESSION_COOKIE_NAME = "__Host-taskboard_session";
 const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 const TASK_TREE_MAX_NODES = 1_000;
+const TASK_LIST_MAX_RESULTS = 1_000;
 
 export class RealtimeHub extends DurableObject {
   async fetch(request) {
@@ -1687,6 +1688,13 @@ async function listTasks(env, filters) {
         id
     `).bind(...values),
   );
+  if (rows.length > TASK_LIST_MAX_RESULTS) {
+    throw new ApiError(
+      413,
+      "TASK_LIST_TOO_LARGE",
+      `Task list cannot exceed ${TASK_LIST_MAX_RESULTS} results; narrow the query with projectId or status`,
+    );
+  }
   const taskIds = rows.map((row) => row.id);
   const [commentsByTask, activitiesByTask] = await Promise.all([
     taskActivityComments(env, taskIds),

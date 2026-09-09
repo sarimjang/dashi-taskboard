@@ -936,6 +936,95 @@ test("cloud tree rejects a breadth that exceeds the 1,000-node cap", async () =>
   assert.equal(result.body.error.code, "TREE_TOO_LARGE");
 });
 
+test("GET /api/tasks rejects a project with more than 1,000 tasks", async () => {
+  const projectId = "task-list-cap";
+  await createProject(projectId);
+  const timestamp = new Date().toISOString();
+
+  // A recursive CTE keeps this cap fixture to a single D1 write instead of 1,001 API mutations.
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < 1001
+    )
+    INSERT INTO tasks (
+      id, identifier, project_id, title, description, status, priority, labels, sort_order,
+      creator_type, creator_id, creator_name,
+      assignee_type, assignee_id, assignee_name,
+      version, created_at, updated_at
+    )
+    SELECT
+      'task-list-cap-' || value,
+      'TASKLISTCAP-' || value,
+      ?,
+      'Task list cap fixture',
+      '',
+      'backlog',
+      'none',
+      '[]',
+      value,
+      'user',
+      'task-list-cap-fixture',
+      'Task list cap fixture',
+      'user',
+      'task-list-cap-fixture',
+      'Task list cap fixture',
+      1,
+      ?,
+      ?
+    FROM sequence
+  `).bind(projectId, timestamp, timestamp).run();
+
+  const result = await cloud.request(`/api/tasks?projectId=${projectId}`, { actorName: alice });
+  assert.equal(result.response.status, 413);
+  assert.equal(result.body.error.code, "TASK_LIST_TOO_LARGE");
+});
+
+test("GET /api/tasks still returns tasks at exactly the 1,000-task cap", async () => {
+  const projectId = "task-list-cap-boundary";
+  await createProject(projectId);
+  const timestamp = new Date().toISOString();
+
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < 1000
+    )
+    INSERT INTO tasks (
+      id, identifier, project_id, title, description, status, priority, labels, sort_order,
+      creator_type, creator_id, creator_name,
+      assignee_type, assignee_id, assignee_name,
+      version, created_at, updated_at
+    )
+    SELECT
+      'task-list-cap-boundary-' || value,
+      'TASKLISTCAPB-' || value,
+      ?,
+      'Task list cap boundary fixture',
+      '',
+      'backlog',
+      'none',
+      '[]',
+      value,
+      'user',
+      'task-list-cap-boundary-fixture',
+      'Task list cap boundary fixture',
+      'user',
+      'task-list-cap-boundary-fixture',
+      'Task list cap boundary fixture',
+      1,
+      ?,
+      ?
+    FROM sequence
+  `).bind(projectId, timestamp, timestamp).run();
+
+  const result = await cloud.request(`/api/tasks?projectId=${projectId}`, { actorName: alice });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.tasks.length, 1000);
+});
+
 test("concurrent inverse parent writes cannot create a cycle", async () => {
   await createProject("concurrent-parent-cycle");
   const first = await createTask("concurrent-parent-cycle", "First");

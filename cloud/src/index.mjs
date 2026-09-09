@@ -1044,8 +1044,28 @@ async function attachmentsForComment(env, commentId) {
   ).map(attachmentFromRow);
 }
 
-async function hydrateComment(env, row) {
-  return commentFromRow(row, await attachmentsForComment(env, row.id));
+async function attachmentsByCommentIdForTask(env, taskId) {
+  const rows = await all(
+    env.DB.prepare(
+      "SELECT * FROM attachments WHERE task_id = ? AND comment_id IS NOT NULL ORDER BY created_at, id",
+    ).bind(taskId),
+  );
+  const byCommentId = new Map();
+  for (const row of rows) {
+    const attachment = attachmentFromRow(row);
+    const list = byCommentId.get(row.comment_id);
+    if (list) {
+      list.push(attachment);
+    } else {
+      byCommentId.set(row.comment_id, [attachment]);
+    }
+  }
+  return byCommentId;
+}
+
+async function hydrateComment(env, row, attachmentsOverride) {
+  const attachments = attachmentsOverride ?? (await attachmentsForComment(env, row.id));
+  return commentFromRow(row, attachments);
 }
 
 async function hydrateTask(env, row, activityComments = null, activityChanges = null) {
@@ -2681,8 +2701,11 @@ async function listComments(env, taskId) {
     WHERE task_id = ?
     ORDER BY created_at, id
   `).bind(task.id));
+  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
   return {
-    comments: await Promise.all(rows.map((row) => hydrateComment(env, row))),
+    comments: await Promise.all(
+      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? [])),
+    ),
     nextCursor: nextCursor(rows, null),
   };
 }
@@ -2695,8 +2718,11 @@ async function listCommentsAfter(env, taskId, after) {
       AND change_revision > ?
     ORDER BY change_revision
   `).bind(task.id, after.revision));
+  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
   return {
-    comments: await Promise.all(rows.map((row) => hydrateComment(env, row))),
+    comments: await Promise.all(
+      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? [])),
+    ),
     nextCursor: nextCursor(rows, after),
   };
 }

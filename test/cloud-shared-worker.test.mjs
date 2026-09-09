@@ -1037,3 +1037,119 @@ test("comment attachment cleanup preserves shared-state boundaries", async () =>
   assert.equal(deleted.response.status, 204);
   assert.deepEqual(await cloud.listAttachmentKeys(), []);
 });
+
+async function uploadCommentAttachment(commentId, filename, actorName = alice) {
+  const response = await cloud.request(`/api/comments/${commentId}/attachments`, {
+    method: "POST",
+    actorName,
+    headers: {
+      "content-type": "text/plain",
+      "x-taskboard-filename": encodeURIComponent(filename),
+      "x-taskboard-attachment-kind": "attachment",
+    },
+    body: `content of ${filename}`,
+  });
+  assert.equal(response.response.status, 201);
+  return response.body.attachment;
+}
+
+function byId(comments) {
+  return new Map(comments.map((comment) => [comment.id, comment]));
+}
+
+function sortedById(attachments) {
+  return [...attachments].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+test("listing task comments batches attachment hydration instead of querying per comment (CWE-400)", async () => {
+  await createProject("comment-batch-query");
+  const task = await createTask("comment-batch-query", "Comment attachment batching");
+  const taskId = task.body.task.id;
+
+  const noAttachments = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: bob,
+    json: { body: "No attachments here" },
+  });
+  assert.equal(noAttachments.response.status, 201);
+
+  const twoAttachments = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Two attachments here" },
+  });
+  assert.equal(twoAttachments.response.status, 201);
+  const twoAttachmentsFirst = await uploadCommentAttachment(
+    twoAttachments.body.comment.id,
+    "two-a.txt",
+  );
+  const twoAttachmentsSecond = await uploadCommentAttachment(
+    twoAttachments.body.comment.id,
+    "two-b.txt",
+  );
+
+  const oneAttachment = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: bob,
+    json: { body: "One attachment here" },
+  });
+  assert.equal(oneAttachment.response.status, 201);
+  const oneAttachmentFile = await uploadCommentAttachment(
+    oneAttachment.body.comment.id,
+    "one.txt",
+  );
+
+  // A task-level attachment (comment_id IS NULL) must never leak into any comment's list.
+  const taskLevelAttachment = await cloud.request(`/api/tasks/${taskId}/attachments`, {
+    method: "POST",
+    actorName: alice,
+    headers: {
+      "content-type": "text/plain",
+      "x-taskboard-filename": "task-level.txt",
+      "x-taskboard-attachment-kind": "attachment",
+    },
+    body: "task-level content",
+  });
+  assert.equal(taskLevelAttachment.response.status, 201);
+
+  // GET /api/tasks/:id/comments (listComments) — no cursor.
+  const listed = await cloud.request(`/api/tasks/${taskId}/comments`, { actorName: alice });
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.comments);
+
+  // Comment with zero attachments must get [] (not undefined, not another comment's attachments).
+  assert.deepEqual(listedById.get(noAttachments.body.comment.id).attachments, []);
+  // Comment with two attachments gets both, matching the upload responses exactly.
+  assert.deepEqual(
+    sortedById(listedById.get(twoAttachments.body.comment.id).attachments),
+    sortedById([twoAttachmentsFirst, twoAttachmentsSecond]),
+  );
+  // Comment with one attachment doesn't pick up its sibling comments' or the task-level attachment.
+  assert.deepEqual(
+    listedById.get(oneAttachment.body.comment.id).attachments,
+    [oneAttachmentFile],
+  );
+
+  // GET /api/tasks/:id/comments?after=0 (listCommentsAfter) must show identical batching behavior.
+  const listedAfter = await cloud.request(
+    `/api/tasks/${taskId}/comments?after=0`,
+    { actorName: alice },
+  );
+  assert.equal(listedAfter.response.status, 200);
+  const listedAfterById = byId(listedAfter.body.comments);
+  assert.deepEqual(listedAfterById.get(noAttachments.body.comment.id).attachments, []);
+  assert.deepEqual(
+    sortedById(listedAfterById.get(twoAttachments.body.comment.id).attachments),
+    sortedById([twoAttachmentsFirst, twoAttachmentsSecond]),
+  );
+  assert.deepEqual(
+    listedAfterById.get(oneAttachment.body.comment.id).attachments,
+    [oneAttachmentFile],
+  );
+
+  // Sanity: the task-level attachment (comment_id IS NULL) doesn't surface on any comment.
+  const taskLevelAttachmentId = taskLevelAttachment.body.attachment.id;
+  for (const comment of listed.body.comments) {
+    assert.ok(!comment.attachments.some((a) => a.id === taskLevelAttachmentId));
+  }
+});

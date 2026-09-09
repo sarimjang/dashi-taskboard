@@ -1152,4 +1152,7 @@ test("listing task comments batches attachment hydration instead of querying per
   for (const comment of listed.body.comments) {
     assert.ok(!comment.attachments.some((a) => a.id === taskLevelAttachmentId));
   }
+  for (const comment of listedAfter.body.comments) {
+    assert.ok(!comment.attachments.some((a) => a.id === taskLevelAttachmentId));
+  }
 });

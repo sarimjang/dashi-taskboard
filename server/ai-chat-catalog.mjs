@@ -278,7 +278,9 @@ function resolvedWorkspace(projectId, project, workspaces) {
   }
   return {
     workspacePath,
-    addDirectories: [...new Set(workspaces.values())].filter((candidate) => candidate !== workspacePath),
+    // Deliberately empty: other mapped projects' paths must never leak into an AI turn's
+    // filesystem scope (dashi-taskboard-8p7 / CWE-863) — do not repopulate from `workspaces`.
+    addDirectories: [],
     project,
   };
 }

@@ -503,7 +503,7 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
   return <pre {...props}>{children}</pre>;
 }
 
-function MarkdownImage({
+export function MarkdownImage({
   src,
   markdown,
   ...props

@@ -31,6 +31,7 @@ const SESSION_COOKIE_NAME = "__Host-taskboard_session";
 const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 const TASK_TREE_MAX_NODES = 1_000;
 const TASK_LIST_MAX_RESULTS = 1_000;
+const COMMENT_LIST_MAX_RESULTS = 1_000;
 
 export class RealtimeHub extends DurableObject {
   async fetch(request) {
@@ -2732,6 +2733,13 @@ async function listComments(env, taskId) {
     WHERE task_id = ?
     ORDER BY created_at, id
   `).bind(task.id));
+  if (rows.length > COMMENT_LIST_MAX_RESULTS) {
+    throw new ApiError(
+      413,
+      "COMMENT_LIST_TOO_LARGE",
+      `Comment list cannot exceed ${COMMENT_LIST_MAX_RESULTS} results; use the ?after= cursor to page incrementally`,
+    );
+  }
   const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
   return {
     comments: await Promise.all(
@@ -2749,6 +2757,13 @@ async function listCommentsAfter(env, taskId, after) {
       AND change_revision > ?
     ORDER BY change_revision
   `).bind(task.id, after.revision));
+  if (rows.length > COMMENT_LIST_MAX_RESULTS) {
+    throw new ApiError(
+      413,
+      "COMMENT_LIST_TOO_LARGE",
+      `Comment list cannot exceed ${COMMENT_LIST_MAX_RESULTS} results since the given cursor; the task has too many changes to page from this position`,
+    );
+  }
   const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
   return {
     comments: await Promise.all(

@@ -307,12 +307,21 @@ function skillDisplayName(skill: Pick<AiChatSkill, "id" | "label">): string {
     .join(" ");
 }
 
-function stableComposerReferenceId(
+// Skill/agent stableIds seen in this repo's own catalogs top out at a few dozen
+// characters (e.g. namespaced skill slugs like "plugin_oh-my-claudecode_t:some-tool").
+// 1024 base64url characters decodes to ~768 bytes — over an order of magnitude more
+// than any legitimate id needs, but far short of the size an attacker would need to
+// paste into the composer to force a costly atob() call (CWE-400); referenceKey comes
+// from pasted composer content, so it's user-controlled.
+const MAX_COMPOSER_REFERENCE_KEY_LENGTH = 1024;
+
+export function stableComposerReferenceId(
   referenceKey: string,
   kind: "skill" | "agent" = "skill",
 ): string | null {
   try {
     if (!/^[A-Za-z0-9_-]+$/.test(referenceKey) || referenceKey.length % 4 === 1) return null;
+    if (referenceKey.length > MAX_COMPOSER_REFERENCE_KEY_LENGTH) return null;
     const padded = `${referenceKey.replace(/-/g, "+").replace(/_/g, "/")}${"=".repeat((4 - referenceKey.length % 4) % 4)}`;
     const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
     const stableId = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -327,7 +336,7 @@ function stableComposerReferenceId(
   }
 }
 
-function stableComposerReferenceKey(
+export function stableComposerReferenceKey(
   stableId: string,
   kind: "skill" | "agent" = "skill",
 ): string {

@@ -1418,3 +1418,224 @@ test("GET /api/tasks/:id/comments still returns comments at exactly the 1,000-co
   assert.equal(afterResult.response.status, 200);
   assert.equal(afterResult.body.comments.length, 1000);
 });
+
+async function createRelation(taskId, type, otherTaskId, version, actorName = alice) {
+  const response = await cloud.request(
+    `/api/tasks/${taskId}/relations/${type}/${otherTaskId}`,
+    { method: "POST", actorName, json: { version } },
+  );
+  assert.equal(response.response.status, 200);
+  return response.body;
+}
+
+async function fetchTask(taskId) {
+  const response = await cloud.request(`/api/tasks/${taskId}`, { actorName: alice });
+  assert.equal(response.response.status, 200);
+  return response.body.task;
+}
+
+test("GET /api/tasks batches task_relations without changing per-task output (CWE-400)", async () => {
+  const projectId = "relations-batch-parity";
+  await createProject(projectId);
+  const parentTask = await createTask(projectId, "Parent");
+  const childTask = await createTask(projectId, "Child");
+  const blockerTask = await createTask(projectId, "Blocker");
+  const blockedTask = await createTask(projectId, "Blocked");
+  const relatedA = await createTask(projectId, "Related A");
+  const relatedB = await createTask(projectId, "Related B");
+  const lonelyTask = await createTask(projectId, "No relations");
+
+  await createRelation(
+    childTask.body.task.id,
+    "parent",
+    parentTask.body.task.id,
+    childTask.body.task.version,
+  );
+  await createRelation(
+    blockedTask.body.task.id,
+    "blocked_by",
+    blockerTask.body.task.id,
+    blockedTask.body.task.version,
+  );
+  await createRelation(
+    relatedA.body.task.id,
+    "related",
+    relatedB.body.task.id,
+    relatedA.body.task.version,
+  );
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.tasks);
+
+  // Explicit shape checks for each of the five relation kinds.
+  assert.equal(listedById.get(childTask.body.task.id).relations.parent.id, parentTask.body.task.id);
+  assert.deepEqual(
+    listedById.get(parentTask.body.task.id).relations.subIssues.map((t) => t.id),
+    [childTask.body.task.id],
+  );
+  assert.deepEqual(
+    listedById.get(blockedTask.body.task.id).relations.blockedBy.map((t) => t.id),
+    [blockerTask.body.task.id],
+  );
+  assert.deepEqual(
+    listedById.get(blockerTask.body.task.id).relations.blocks.map((t) => t.id),
+    [blockedTask.body.task.id],
+  );
+  // 'related' is bidirectional: both ends of the same batch must see each other,
+  // even though only one side issued the POST that created the relation.
+  assert.deepEqual(
+    listedById.get(relatedA.body.task.id).relations.related.map((t) => t.id),
+    [relatedB.body.task.id],
+  );
+  assert.deepEqual(
+    listedById.get(relatedB.body.task.id).relations.related.map((t) => t.id),
+    [relatedA.body.task.id],
+  );
+  // A task with no task_relations rows gets null/[] for every field, not undefined or a crash.
+  assert.deepEqual(listedById.get(lonelyTask.body.task.id).relations, {
+    parent: null,
+    subIssues: [],
+    blockedBy: [],
+    blocks: [],
+    related: [],
+  });
+
+  // The batched list path (listTasks -> hydrateTask with relationsOverride) must produce
+  // byte-for-byte the same `.relations` as the unbatched single-task path (getTask ->
+  // hydrateTask with no override), for every task in the page.
+  for (const created of [
+    parentTask, childTask, blockerTask, blockedTask, relatedA, relatedB, lonelyTask,
+  ]) {
+    const single = await fetchTask(created.body.task.id);
+    assert.deepEqual(
+      listedById.get(created.body.task.id).relations,
+      single.relations,
+      `relations mismatch for task ${created.body.task.id}`,
+    );
+  }
+});
+
+async function insertTaskFixtures(projectId, count, prefix) {
+  const timestamp = new Date().toISOString();
+  // A recursive CTE keeps this fixture to a single D1 write instead of `count` API mutations,
+  // mirroring insertCommentFixtures/the tree-cap fixtures above. sort_order = value drives
+  // GET /api/tasks' ordering deterministically so batch-chunk boundaries land on known rows.
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO tasks (
+      id, identifier, project_id, title, description, status, priority, labels, sort_order,
+      creator_type, creator_id, creator_name,
+      assignee_type, assignee_id, assignee_name,
+      version, created_at, updated_at
+    )
+    SELECT
+      ? || '-' || value,
+      upper(?) || '-' || value,
+      ?,
+      'Relation batch fixture',
+      '',
+      'backlog',
+      'none',
+      '[]',
+      value,
+      'user',
+      'relation-batch-fixture',
+      'Relation batch fixture',
+      'user',
+      'relation-batch-fixture',
+      'Relation batch fixture',
+      1,
+      ?,
+      ?
+    FROM sequence
+  `).bind(count, prefix, prefix, projectId, timestamp, timestamp).run();
+}
+
+test("GET /api/tasks keeps task_relations correct across batch-chunk boundaries (CWE-400)", async () => {
+  const projectId = "relations-batch-boundary";
+  const prefix = "relbatch";
+  const idFor = (value) => `${prefix}-${value}`;
+  await createProject(projectId);
+  // 90 tasks: bigger than both the 'related' chunk size (40) and the parent/blocks chunk
+  // size (80), so relations placed across those boundaries prove chunking doesn't drop or
+  // duplicate rows.
+  await insertTaskFixtures(projectId, 90, prefix);
+  const timestamp = new Date().toISOString();
+
+  // 'related' crossings: one spanning chunk 0 (1-40) and chunk 1 (41-80), one sitting
+  // exactly on the chunk 0/1 boundary edge.
+  const relatedPairs = [[1, 45], [40, 41]];
+  // 'parent'/'blocks' crossings: spanning chunk 0 (1-80) and chunk 1 (81-90).
+  const parentPair = [3, 88]; // [parent, child]
+  const blocksPair = [5, 86]; // [blocker, blocked]
+
+  for (const [a, b] of relatedPairs) {
+    await cloud.db.prepare(`
+      INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+      VALUES ('related', ?, ?, ?)
+    `).bind(idFor(a), idFor(b), timestamp).run();
+  }
+  await cloud.db.prepare(`
+    INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+    VALUES ('parent', ?, ?, ?)
+  `).bind(idFor(parentPair[0]), idFor(parentPair[1]), timestamp).run();
+  await cloud.db.prepare(`
+    INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+    VALUES ('blocks', ?, ?, ?)
+  `).bind(idFor(blocksPair[0]), idFor(blocksPair[1]), timestamp).run();
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.tasks.length, 90);
+  const listedById = byId(listed.body.tasks);
+
+  for (const [a, b] of relatedPairs) {
+    assert.deepEqual(
+      listedById.get(idFor(a)).relations.related.map((t) => t.id),
+      [idFor(b)],
+      `task ${idFor(a)} should see ${idFor(b)} as related`,
+    );
+    assert.deepEqual(
+      listedById.get(idFor(b)).relations.related.map((t) => t.id),
+      [idFor(a)],
+      `task ${idFor(b)} should see ${idFor(a)} as related`,
+    );
+  }
+  assert.equal(listedById.get(idFor(parentPair[1])).relations.parent.id, idFor(parentPair[0]));
+  assert.deepEqual(
+    listedById.get(idFor(parentPair[0])).relations.subIssues.map((t) => t.id),
+    [idFor(parentPair[1])],
+  );
+  assert.deepEqual(
+    listedById.get(idFor(blocksPair[1])).relations.blockedBy.map((t) => t.id),
+    [idFor(blocksPair[0])],
+  );
+  assert.deepEqual(
+    listedById.get(idFor(blocksPair[0])).relations.blocks.map((t) => t.id),
+    [idFor(blocksPair[1])],
+  );
+
+  // Cross-check the boundary-straddling tasks against the unbatched single-task path too.
+  const touchedIds = [
+    ...relatedPairs.flat(), parentPair[0], parentPair[1], blocksPair[0], blocksPair[1],
+  ].map(idFor);
+  for (const taskId of touchedIds) {
+    const single = await fetchTask(taskId);
+    assert.deepEqual(
+      listedById.get(taskId).relations,
+      single.relations,
+      `relations mismatch for task ${taskId}`,
+    );
+  }
+});

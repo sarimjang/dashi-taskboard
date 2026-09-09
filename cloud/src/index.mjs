@@ -1088,16 +1088,15 @@ async function hydrateComment(env, row, attachmentsOverride) {
   return comment;
 }
 
-async function hydrateTask(env, row, activityComments = null, activityChanges = null) {
-  const task = taskFromRow(row);
-  const [parent, subIssues, blockedBy, blocks, related, previewImageRow] = await Promise.all([
+async function taskRelationsForRow(env, taskId) {
+  const [parent, subIssues, blockedBy, blocks, related] = await Promise.all([
     env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
       JOIN tasks ON tasks.id = task_relations.source_task_id
       WHERE task_relations.relation_type = 'parent'
         AND task_relations.target_task_id = ?
-    `).bind(task.id).first(),
+    `).bind(taskId).first(),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1105,7 +1104,7 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
       WHERE task_relations.relation_type = 'parent'
         AND task_relations.source_task_id = ?
       ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(task.id)),
+    `).bind(taskId)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1113,7 +1112,7 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
       WHERE task_relations.relation_type = 'blocks'
         AND task_relations.target_task_id = ?
       ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(task.id)),
+    `).bind(taskId)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1121,7 +1120,7 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
       WHERE task_relations.relation_type = 'blocks'
         AND task_relations.source_task_id = ?
       ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(task.id)),
+    `).bind(taskId)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1135,7 +1134,157 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
           OR task_relations.target_task_id = ?
         )
       ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(task.id, task.id, task.id)),
+    `).bind(taskId, taskId, taskId)),
+  ]);
+  return { parent, subIssues, blockedBy, blocks, related };
+}
+
+// Batch versions of taskRelationsForRow's five queries, keyed by owner task id,
+// for listTasks() to fetch once per page instead of once per row (CWE-400 N+1).
+async function relationParentsByTaskId(env, taskIds) {
+  const parentByTaskId = new Map();
+  const batches = [];
+  for (let offset = 0; offset < taskIds.length; offset += 80) {
+    const chunk = taskIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(", ");
+    batches.push(all(env.DB.prepare(`
+      SELECT tasks.*, task_relations.target_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.source_task_id
+      WHERE task_relations.relation_type = 'parent'
+        AND task_relations.target_task_id IN (${placeholders})
+    `).bind(...chunk)));
+  }
+  for (const rows of await Promise.all(batches)) {
+    for (const row of rows) {
+      if (!parentByTaskId.has(row.relation_owner_id)) {
+        parentByTaskId.set(row.relation_owner_id, row);
+      }
+    }
+  }
+  return parentByTaskId;
+}
+
+async function relationSubIssuesByTaskId(env, taskIds) {
+  const subIssuesByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
+  const batches = [];
+  for (let offset = 0; offset < taskIds.length; offset += 80) {
+    const chunk = taskIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(", ");
+    batches.push(all(env.DB.prepare(`
+      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.target_task_id
+      WHERE task_relations.relation_type = 'parent'
+        AND task_relations.source_task_id IN (${placeholders})
+      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
+    `).bind(...chunk)));
+  }
+  for (const rows of await Promise.all(batches)) {
+    for (const row of rows) subIssuesByTaskId.get(row.relation_owner_id)?.push(row);
+  }
+  return subIssuesByTaskId;
+}
+
+async function relationBlockedByByTaskId(env, taskIds) {
+  const blockedByByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
+  const batches = [];
+  for (let offset = 0; offset < taskIds.length; offset += 80) {
+    const chunk = taskIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(", ");
+    batches.push(all(env.DB.prepare(`
+      SELECT tasks.*, task_relations.target_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.source_task_id
+      WHERE task_relations.relation_type = 'blocks'
+        AND task_relations.target_task_id IN (${placeholders})
+      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
+    `).bind(...chunk)));
+  }
+  for (const rows of await Promise.all(batches)) {
+    for (const row of rows) blockedByByTaskId.get(row.relation_owner_id)?.push(row);
+  }
+  return blockedByByTaskId;
+}
+
+async function relationBlocksByTaskId(env, taskIds) {
+  const blocksByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
+  const batches = [];
+  for (let offset = 0; offset < taskIds.length; offset += 80) {
+    const chunk = taskIds.slice(offset, offset + 80);
+    const placeholders = chunk.map(() => "?").join(", ");
+    batches.push(all(env.DB.prepare(`
+      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.target_task_id
+      WHERE task_relations.relation_type = 'blocks'
+        AND task_relations.source_task_id IN (${placeholders})
+      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
+    `).bind(...chunk)));
+  }
+  for (const rows of await Promise.all(batches)) {
+    for (const row of rows) blocksByTaskId.get(row.relation_owner_id)?.push(row);
+  }
+  return blocksByTaskId;
+}
+
+// 'related' is undirected: a relation between two tasks belongs on both sides'
+// lists. Each chunk binds taskIds twice (once as source, once as target), so
+// it uses a smaller chunk size than the single-IN-clause queries above to keep
+// total bound parameters per statement in the same ballpark (~80) as the rest
+// of this file's batching (see relationParentsByTaskId etc., and
+// taskActivityComments/taskActivitiesForTasks).
+const RELATED_BATCH_CHUNK_SIZE = 40;
+
+async function relationRelatedByTaskId(env, taskIds) {
+  const relatedByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
+  const batches = [];
+  for (let offset = 0; offset < taskIds.length; offset += RELATED_BATCH_CHUNK_SIZE) {
+    const chunk = taskIds.slice(offset, offset + RELATED_BATCH_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(", ");
+    batches.push(all(env.DB.prepare(`
+      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.target_task_id
+      WHERE task_relations.relation_type = 'related'
+        AND task_relations.source_task_id IN (${placeholders})
+      UNION ALL
+      SELECT tasks.*, task_relations.target_task_id AS relation_owner_id
+      FROM task_relations
+      JOIN tasks ON tasks.id = task_relations.source_task_id
+      WHERE task_relations.relation_type = 'related'
+        AND task_relations.target_task_id IN (${placeholders})
+      ORDER BY sort_order, created_at, id
+    `).bind(...chunk, ...chunk)));
+  }
+  for (const rows of await Promise.all(batches)) {
+    for (const row of rows) relatedByTaskId.get(row.relation_owner_id)?.push(row);
+  }
+  return relatedByTaskId;
+}
+
+async function taskRelationsByTaskId(env, taskIds) {
+  const [parentByTaskId, subIssuesByTaskId, blockedByByTaskId, blocksByTaskId, relatedByTaskId] =
+    await Promise.all([
+      relationParentsByTaskId(env, taskIds),
+      relationSubIssuesByTaskId(env, taskIds),
+      relationBlockedByByTaskId(env, taskIds),
+      relationBlocksByTaskId(env, taskIds),
+      relationRelatedByTaskId(env, taskIds),
+    ]);
+  return new Map(taskIds.map((taskId) => [taskId, {
+    parent: parentByTaskId.get(taskId) ?? null,
+    subIssues: subIssuesByTaskId.get(taskId) ?? [],
+    blockedBy: blockedByByTaskId.get(taskId) ?? [],
+    blocks: blocksByTaskId.get(taskId) ?? [],
+    related: relatedByTaskId.get(taskId) ?? [],
+  }]));
+}
+
+async function hydrateTask(env, row, activityComments = null, activityChanges = null, relationsOverride = null) {
+  const task = taskFromRow(row);
+  const [relations, previewImageRow] = await Promise.all([
+    relationsOverride ?? taskRelationsForRow(env, task.id),
     env.DB.prepare(`
       SELECT attachments.*
       FROM attachments
@@ -1149,11 +1298,11 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
     `).bind(task.id).first(),
   ]);
   task.relations = {
-    parent: parent ? taskRelationSummaryFromRow(parent) : null,
-    subIssues: subIssues.map(taskRelationSummaryFromRow),
-    blockedBy: blockedBy.map(taskRelationSummaryFromRow),
-    blocks: blocks.map(taskRelationSummaryFromRow),
-    related: related.map(taskRelationSummaryFromRow),
+    parent: relations.parent ? taskRelationSummaryFromRow(relations.parent) : null,
+    subIssues: relations.subIssues.map(taskRelationSummaryFromRow),
+    blockedBy: relations.blockedBy.map(taskRelationSummaryFromRow),
+    blocks: relations.blocks.map(taskRelationSummaryFromRow),
+    related: relations.related.map(taskRelationSummaryFromRow),
   };
   const comments = activityComments ?? await all(env.DB.prepare(`
     SELECT
@@ -1740,15 +1889,17 @@ async function listTasks(env, filters) {
     );
   }
   const taskIds = rows.map((row) => row.id);
-  const [commentsByTask, activitiesByTask] = await Promise.all([
+  const [commentsByTask, activitiesByTask, relationsByTaskId] = await Promise.all([
     taskActivityComments(env, taskIds),
     taskActivitiesForTasks(env, taskIds),
+    taskRelationsByTaskId(env, taskIds),
   ]);
   return Promise.all(rows.map((row) => hydrateTask(
     env,
     row,
     commentsByTask.get(row.id) ?? [],
     activitiesByTask.get(row.id) ?? [],
+    relationsByTaskId.get(row.id),
   )));
 }
 

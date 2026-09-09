@@ -4,6 +4,7 @@ import "../vendor/dhtmlxgantt.css";
 import type { Task, TaskDraft } from "../types";
 import type { TaskCardPresentation } from "../taskConversations";
 import { useTaskboardI18n } from "../i18n";
+import { classifyMediaUrl } from "../mediaAccessPolicy";
 import { LinearIcon } from "./LinearIcon";
 import { DueDateIcon } from "./SemanticIcons";
 import { taskboardIconSource } from "./TaskboardIcon";
@@ -92,6 +93,23 @@ function escapeHtml(value: string) {
     '"': "&quot;",
     "'": "&#039;",
   }[character]!));
+}
+
+// The gantt bar is a dhtmlx `task_text` template string, not a React tree, so there is
+// no click-to-reveal affordance like ActorAvatar's. Only same-origin attachment URLs
+// (classifyMediaUrl === "attachment") are safe to auto-load here; "external" and
+// "blocked" both fall back to the initial placeholder — the real avatar is still
+// reachable via ActorAvatar elsewhere (e.g. the task card), which does gate reveal.
+export function ganttAssigneeAvatarMarkup(
+  assigneeType: Task["assignee"]["type"] | null,
+  avatarUrl: string | null,
+  initial: string,
+): string {
+  if (assigneeType === "agent") return `<img src="codex-agent-logo.png" alt="">`;
+  if (avatarUrl && classifyMediaUrl(avatarUrl) === "attachment") {
+    return `<img src="${escapeHtml(avatarUrl)}" alt="">`;
+  }
+  return `<span>${escapeHtml(initial)}</span>`;
 }
 
 function dateCellClass(date: Date) {
@@ -185,11 +203,11 @@ export function GanttView({ tasks, presentations, hasActiveFilters, zoom, hideCo
       const dateLabel = start.getFullYear() === displayEnd.getFullYear()
         ? `${ganttDate(start, i18nRef.current.locale)} — ${ganttDate(displayEnd, i18nRef.current.locale)}`
         : `${ganttDate(start, i18nRef.current.locale, true)} — ${ganttDate(displayEnd, i18nRef.current.locale, true)}`;
-      const avatar = task.taskboardAssigneeType === "agent"
-        ? `<img src="codex-agent-logo.png" alt="">`
-        : task.taskboardAssigneeAvatarUrl
-        ? `<img src="${escapeHtml(task.taskboardAssigneeAvatarUrl)}" alt="">`
-        : `<span>${escapeHtml(task.taskboardAssigneeInitial)}</span>`;
+      const avatar = ganttAssigneeAvatarMarkup(
+        task.taskboardAssigneeType,
+        task.taskboardAssigneeAvatarUrl,
+        task.taskboardAssigneeInitial,
+      );
       return `<span class="gantt-bar-content"><i class="gantt-bar-assignee${task.taskboardAssigneeType === "agent" ? " is-agent" : ""}" title="${escapeHtml(task.taskboardAssigneeName)}">${avatar}</i><span class="gantt-bar-copy"><strong>${escapeHtml(task.taskboardTitle)}</strong><small>${dateLabel}</small></span></span>`;
     };
     const rowClass = (item: GanttTask) => {

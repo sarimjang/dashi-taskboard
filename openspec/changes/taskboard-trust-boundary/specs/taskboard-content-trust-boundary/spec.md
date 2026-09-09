@@ -2,12 +2,17 @@
 
 ### Requirement: Automation prompt field interpolation SHALL use delimited untrusted-data wrapping
 
-The automation prompt builder SHALL wrap every host-request field value it interpolates into the generated prompt with a consistent delimiter that marks the value as untrusted taskboard-supplied data.
+The automation prompt builder SHALL wrap each host-request field's value in at least one delimited occurrence — within the identifying description line or Codex identity line the builder generates — with a consistent delimiter that marks that occurrence as untrusted taskboard-supplied data. Interpolation points that assemble a literal `taskctl` CLI argument from a host-request field (for example `--binding-codex-project-id`, `--binding-workspace-path`, or `issue list --project`) are intentionally excluded from this wrapping requirement, because wrapping them would bake the delimiter markers into the literal shell command the agent executes, breaking the automation.
 
 #### Scenario: Ordinary field value is wrapped
 
 - **WHEN** the automation prompt is built for a request whose `projectName` does not contain a delimiter sequence
 - **THEN** the generated prompt contains that `projectName` value fully enclosed within the delimiter markers
+
+#### Scenario: CLI-literal interpolation points remain unwrapped
+
+- **WHEN** the automation prompt assembles a literal `taskctl` CLI argument value from a host-request field
+- **THEN** that specific interpolation point uses the field's raw value directly, without delimiter wrapping, so the generated instruction remains a valid shell argument for the agent to execute
 
 ### Requirement: Delimiter boundaries SHALL be escaped against field values that contain a delimiter sequence
 

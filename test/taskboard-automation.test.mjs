@@ -233,7 +233,7 @@ test("wrapUntrustedTaskboardField encloses instruction-like text without grantin
   );
 });
 
-test("the automation prompt wraps every interpolated host-request field as untrusted data", () => {
+test("the automation prompt exposes each host-request field through at least one wrapped identifying line", () => {
   const prompt = buildTaskboardAutomationPrompt(baseRequest);
   assert.ok(prompt.includes(wrapUntrustedTaskboardField(baseRequest.projectName)));
   assert.ok(prompt.includes(wrapUntrustedTaskboardField(baseRequest.taskboardProjectId)));
@@ -248,6 +248,44 @@ test("the automation prompt wraps every interpolated host-request field as untru
   assert.ok(remotePrompt.includes(wrapUntrustedTaskboardField(remoteRequest.codexProjectId)));
   assert.ok(remotePrompt.includes(wrapUntrustedTaskboardField(remoteRequest.codexHostId)));
   assert.ok(remotePrompt.includes(wrapUntrustedTaskboardField(JSON.stringify(remoteRequest.remoteProjects))));
+});
+
+test("CLI-literal taskctl argument interpolations remain intentionally unwrapped", () => {
+  const prompt = buildTaskboardAutomationPrompt(baseRequest);
+
+  // `issue list --project` 的字面 CLI 参数使用原始未包裹值，开始时与处理后各出现一次。
+  const issueListPattern = new RegExp(
+    `issue list --project ${baseRequest.taskboardProjectId} --status todo --json`,
+    "g",
+  );
+  assert.equal((prompt.match(issueListPattern) ?? []).length, 2);
+
+  // 本地认领分支组装 --binding-* CLI 参数时使用原始未包裹值，不是包裹版本。
+  assert.ok(prompt.includes(
+    `--binding-codex-project-id ${JSON.stringify(baseRequest.codexProjectId)}`,
+  ));
+  assert.ok(prompt.includes(
+    `--binding-codex-host-id ${JSON.stringify(baseRequest.codexHostId)}`,
+  ));
+  assert.ok(prompt.includes(
+    `--binding-workspace-path ${JSON.stringify(baseRequest.workspacePath)}`,
+  ));
+
+  const remotePrompt = buildTaskboardAutomationPrompt(remoteRequest);
+
+  // 远程分支导入项目 identity 字面声明使用原始未包裹值。
+  assert.ok(remotePrompt.includes(
+    `projectId=${JSON.stringify(remoteRequest.codexProjectId)}、` +
+      `hostId=${JSON.stringify(remoteRequest.codexHostId)}、` +
+      `workspacePath=${JSON.stringify(remoteRequest.workspacePath)}`,
+  ));
+  assert.ok(remotePrompt.includes(
+    `同一保存主机当前可用的精确远程项目映射是 ${JSON.stringify(remoteRequest.remoteProjects)}`,
+  ));
+  // worktree 匹配条件里的 codexHostId 同样使用原始未包裹值。
+  assert.ok(remotePrompt.includes(
+    `codexHostId=${JSON.stringify(remoteRequest.codexHostId)} 且 workspacePath 与 developmentContext.path 完全相同的项`,
+  ));
 });
 
 test("the automation prompt declares untrusted-data framing before any delimited field value", () => {

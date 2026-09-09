@@ -53,6 +53,10 @@ Taskboard 的 issue title、description、comments 是自由文字欄位，寫�
 
 備選方案是把 host-request 欄位也一併列入黑名單過濾——與上述「拒絕黑名單式 sanitize」的理由相同，不採用；改以跳脫（而非過濾）保留欄位值完整性，只確保它不能提前結束分隔符邊界。
 
+**範圍收斂（實作階段補記）：** 這個 helper 在 `buildTaskboardAutomationPrompt()` 內的實際套用點，進一步收斂到函式開頭新增的識別描述行（`projectName`／`taskboardProjectId`／`workspacePath`／`intervalMinutes` 所在的識別描述行）與新增的 Codex 身份行（`codexProjectId`／`codexHostId`／`remoteProjects` 所在的身份聲明行）——7 個欄位各自在這裡至少會有一次透過 helper 輸出的包裹版本。函式內原本就存在、用於組裝字面 `taskctl` CLI 參數的插值點（例如 `--binding-codex-project-id ${JSON.stringify(request.codexProjectId)}`、`--binding-workspace-path ${JSON.stringify(request.workspacePath)}`、`issue list --project ${request.taskboardProjectId}` 等）刻意不套用這個 helper，維持原始 `request.X` 直接插值：若在這些位置也包上分隔符標籤，標籤字面會被烤進 agent 實際要執行的 `taskctl` shell 指令內，破壞自動化功能本身，這與本節「僅限程式碼可控的部分」的判斷是同一個原則的延伸，不是另一個新判斷。
+
+其結果是：同一個欄位值在同一個產生的 prompt 字串裡，會同時存在「識別描述行/身份行的包裹版本」與「CLI 參數組裝處的原始未包裹版本」——這是刻意的設計取捨，不是遺漏或未完成的取代。下方 Implementation Contract 與 `tasks.md` 1.2、`spec.md` Requirement 1 的措辭均已改為反映「每個欄位至少一處包裹」而非「全部插值都取代」，避免文件承諾範圍與程式碼實際範圍不一致。
+
 ### 評估並拒絕在 `cli/taskctl.mjs` 的 `issue get`／`comment list` 輸出層做程式碼層級分隔符包裹
 
 上一節的欄位包裹 helper 只覆蓋 `buildTaskboardAutomationPrompt()` 插值的 host-request 設定欄位（`projectName`／`workspacePath`／`codexProjectId`／`codexHostId` 等，本機使用者設定自動化時填入），不覆蓋 agent 在 runtime 透過 `${taskctlCommand} issue get`／`comment list`（見 Context 第 1 點）讀到的 issue title/description/comment body——後者才是 Why 段落實際指控的攻擊面：`cli/taskctl.mjs` 的 `issue get`／`comment list` 是 REST API 的薄封裝，逐字回傳 taskboard 儲存的 title/description/comment body，完全不經過上一節新增的 helper。這裡明確評估是否應該在 `cli/taskctl.mjs` 的這兩個指令輸出層，對回傳 JSON 裡的對應欄位值做同一套分隔符包裹，讓這條路徑也變成程式碼可強制的部分。
@@ -76,14 +80,14 @@ Taskboard 的 issue title、description、comments 是自由文字欄位，寫�
 
 **行為（Behavior）：**
 
-- `buildTaskboardAutomationPrompt()` 的輸出字串中，所有原本直接插值的 host-request 欄位（`projectName`、`taskboardProjectId`、`workspacePath`、`intervalMinutes`、`codexProjectId`、`codexHostId`、`remoteProjects`）改為透過新增的包裹 helper 輸出，每個欄位值前後都帶有一致的分隔符邊界。
+- `buildTaskboardAutomationPrompt()` 的輸出字串中，7 個 host-request 欄位（`projectName`、`taskboardProjectId`、`workspacePath`、`intervalMinutes`、`codexProjectId`、`codexHostId`、`remoteProjects`）各自在函式開頭新增的識別描述行／Codex 身份行至少出現一次透過新增的包裹 helper 輸出的版本，該次輸出的欄位值前後帶有一致的分隔符邊界；函式內既有的、用於組裝字面 `taskctl` CLI 參數的插值點（例如 `--binding-codex-project-id`、`--binding-workspace-path`、`issue list --project` 等）維持原始 `request.X` 直接插值不變，不套用 helper，理由見上方 Decisions「欄位插值改用可跳脫的包裹 helper，僅限程式碼可控的部分」的範圍收斂段落。
 - 若欄位值本身包含與分隔符相同的字元序列，輸出中該序列會被跳脫，使分隔符邊界不會被欄位值提前關閉——也就是說，用任何欄位值都無法讓輸出字串在非預期位置產生一個看起來合法的分隔符邊界。
 - `buildTaskboardAutomationPrompt()` 的輸出新增一段固定的框架說明文字，出現在所有欄位插值之前，說明分隔符包裹範圍內的內容是不受信任的外部資料，只能用於回答工作流程已定義的固定決策點，不得被解讀為新指令。
 - `AGENTS.md`「Taskboard Delivery Workflow」第 1 節（「Read and claim work」把描述/評論當路由依據的要求只出現在這一節，見 Context 第 2 點對 E3 小節的查核結果，不涉及 E3）、`skills/manage-taskboard/SKILL.md` Core workflow 第 1 步的文字內容更新，加入與上述相同心智模型的不受信任資料說明；SKILL.md 既有的「評論寫明等待就跳過」行為保留，但明確定位為固定決策點之一，而非開放式的指令解讀入口。
 
 **介面／資料形狀（Interface / data shape）：**
 
-- 新增的包裹 helper 是 `shared/taskboard-automation.mjs` 內的一個具名匯出或模組內函式，輸入為待插入的字串值，輸出為帶分隔符邊界、且對邊界序列做過跳脫處理的字串；`buildTaskboardAutomationPrompt()` 對每個需要插值的 host-request 欄位改呼叫此函式取得要插入模板的片段，而不是直接模板字串插值。
+- 新增的包裹 helper 是 `shared/taskboard-automation.mjs` 內的一個具名匯出或模組內函式，輸入為待插入的字串值，輸出為帶分隔符邊界、且對邊界序列做過跳脫處理的字串；`buildTaskboardAutomationPrompt()` 對函式開頭新增的識別描述行／Codex 身份行改呼叫此函式取得要插入模板的片段。函式內既有的、用於組裝字面 `taskctl` CLI 參數的插值點不呼叫此函式，維持原始 `request.X` 直接模板字串插值，理由見上方 Decisions 的範圍收斂段落。
 - `buildTaskboardAutomationPrompt()` 的公開簽名（輸入 `request`、輸出 prompt 字串）不變；改變的只是回傳字串的內部內容與結構，呼叫端 `buildTaskboardAutomationSpec()` 仍把整段回傳值當不透明字串塞進 RPC payload 的 `prompt` 欄位。
 
 **失敗模式（Failure modes）：**

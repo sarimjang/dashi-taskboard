@@ -582,6 +582,37 @@ test("permanent task deletion requires archiving and cleans D1 and R2", async ()
   })).response.status, 204);
 });
 
+test("deleting an empty project also cleans up its R2 README attachment", async () => {
+  await createProject("temp-readme-delete");
+  const uploaded = await cloud.request("/api/projects/temp-readme-delete/readme/attachments", {
+    method: "POST",
+    actorName: alice,
+    headers: {
+      "content-type": "text/plain",
+      "x-taskboard-filename": "readme-evidence.txt",
+      "x-taskboard-attachment-kind": "inline",
+    },
+    body: "readme attachment",
+  });
+  assert.equal(uploaded.response.status, 201);
+  const attachmentId = uploaded.body.attachment.id;
+  assert.ok((await cloud.listAttachmentKeys()).includes(attachmentId));
+
+  const deleted = await cloud.request("/api/projects/temp-readme-delete", {
+    method: "DELETE",
+    actorName: alice,
+  });
+  assert.equal(deleted.response.status, 204);
+
+  assert.equal(
+    await cloud.db.prepare("SELECT 1 FROM project_readme_attachments WHERE id = ?")
+      .bind(attachmentId).first(),
+    null,
+  );
+  assert.equal(await cloud.attachments.get(attachmentId), null);
+  assert.ok(!(await cloud.listAttachmentKeys()).includes(attachmentId));
+});
+
 test("the global revision is monotonic and lets clients poll only when data changed", async () => {
   const initial = await cloud.request("/api/revisions?since=0", { actorName: alice });
   assert.equal(initial.response.status, 200);

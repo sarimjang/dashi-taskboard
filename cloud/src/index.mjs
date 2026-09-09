@@ -1638,17 +1638,22 @@ async function deleteProject(env, id) {
   if (!id.startsWith("temp-")) {
     throw new ApiError(403, "PROJECT_DELETE_FORBIDDEN", "Only manually created projects can be deleted");
   }
-  const result = await env.DB.prepare(`
-    DELETE FROM projects
-    WHERE id = ?
-      AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
-  `).bind(id, id).run();
-  if (!changed(result)) {
+  const results = await env.DB.batch([
+    env.DB.prepare("SELECT id FROM project_readme_attachments WHERE project_id = ?").bind(id),
+    env.DB.prepare(`
+      DELETE FROM projects
+      WHERE id = ?
+        AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
+    `).bind(id, id),
+  ]);
+  if (!changed(results[1])) {
     const issueCount = Number(await env.DB.prepare(`
       SELECT COUNT(*) AS issue_count FROM tasks WHERE project_id = ?
     `).bind(id).first("issue_count"));
     throw new ApiError(409, "PROJECT_NOT_EMPTY", "Project still contains issues", { issueCount });
   }
+  const attachmentIds = results[0].results.map((attachment) => attachment.id);
+  await Promise.all(attachmentIds.map((attachmentId) => env.ATTACHMENTS.delete(attachmentId)));
   return project;
 }
 

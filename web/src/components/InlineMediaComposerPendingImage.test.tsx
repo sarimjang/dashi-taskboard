@@ -77,4 +77,34 @@ describe("pendingImageComposerReference size limit (CWE-400 regression, bd: dash
     expect(second.some((segment) => segment.type === "pending-image")).toBe(true);
     expect(atobSpy.mock.calls.length).toBe(callsAfterFirstDecode);
   });
+
+  it("does not let an unrelated image node collide with another node's cached result via ambiguous key concatenation (F1 regression)", () => {
+    const bytes = new TextEncoder().encode("ok"); // small, under the mocked 12-byte limit
+    const pendingUrl = pendingImagePseudoUrl(base64UrlEncode(bytes));
+    // Deliberately does NOT start with "taskboard://" (has a "pic " prefix), so it must
+    // never match PENDING_IMAGE_COMPOSER_REFERENCE_URL on its own. Under the old cache
+    // key scheme (`${name} ${url}`, naive concatenation with a space delimiter), the
+    // pair (name="cat", url=`pic ${pendingUrl}`) collides byte-for-byte with
+    // (name="cat pic", url=pendingUrl) because both concatenate to the same string.
+    const collidingUrl = `pic ${pendingUrl}`;
+    const markdown = `![cat pic](${pendingUrl})\n\n![cat](<${collidingUrl}>)`;
+
+    const segments = createInlineMediaSegments(markdown);
+    const images = segments.filter(
+      (segment) => segment.type === "pending-image" || segment.type === "persisted-image",
+    );
+    expect(images).toHaveLength(2);
+
+    const [first, second] = images;
+    expect(first.type).toBe("pending-image");
+    if (first.type !== "pending-image") throw new Error("expected first node to decode as pending-image");
+    expect(first.file.type).toBe("image/png");
+
+    // The second node's url never matched the pending-image pattern, so it must fall
+    // back to persisted-image carrying its own raw url — not silently borrow the first
+    // node's cached pending-image file/dataUrl through a colliding cache key.
+    expect(second.type).toBe("persisted-image");
+    if (second.type !== "persisted-image") throw new Error("expected second node to fall back to persisted-image");
+    expect(second.url).toBe(collidingUrl);
+  });
 });

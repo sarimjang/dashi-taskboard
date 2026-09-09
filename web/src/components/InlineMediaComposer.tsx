@@ -268,7 +268,14 @@ function pendingImageComposerReference(
   // 以 (name, url) 為 key 快取解碼結果：避免同一個 pseudo-URL 在
   // removeUnreferencedMentionRelations 等重複掃描路徑上被反覆解碼成新的
   // binary/Uint8Array/File/dataUrl 副本；Map 有上限，避免快取本身變成新的無上限成長點。
-  const cacheKey = `${name} ${url}`;
+  // 兩者都要納入 key，但理由各自獨立、非聯合映射：url（經 match[1]/match[2]）
+  // 決定 type/bytes/dataUrl，name 則獨立決定 new File() 的 file.name，兩個輸入
+  // 互不影響對方。用 JSON.stringify 而非純字串相接／空白分隔：name、url 皆為
+  // 使用者可控輸入，可能自帶空白或 "taskboard://" 子字串，純相接會讓兩個不同
+  // (name,url) 組合撞出同一把 key（例如 name="cat pic"、url="taskboard://..."
+  // 對上 name="cat"、url="pic taskboard://..."）；JSON.stringify 的逐字元跳脫
+  // 使其自我分隔（self-delimiting），不會有這種歧義。
+  const cacheKey = JSON.stringify([name, url]);
   if (pendingImageReferenceCache.has(cacheKey)) {
     const cached = pendingImageReferenceCache.get(cacheKey)!;
     pendingImageReferenceCache.delete(cacheKey);

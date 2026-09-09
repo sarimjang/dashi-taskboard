@@ -2072,7 +2072,12 @@ export const InlineMediaComposer = forwardRef<InlineMediaComposerHandle, InlineM
           {atomPortals}
         </div>
         {completionQuery
-          && (completionLoading || completionError !== null || completionSelections.length > 0)
+          && (
+            completionLoading
+            || completionError !== null
+            || completionSelections.length > 0
+            || completionResponse !== null
+          )
           && (
           <ComposerCompletionMenu
             anchor={completionQuery.anchor}

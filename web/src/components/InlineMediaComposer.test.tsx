@@ -201,8 +201,10 @@ describe("InlineMediaComposer completion references", () => {
     );
     fireEvent.keyDown(editor, { key: "Tab" });
 
+    // serializeInlineMediaSegments always forces a taskboard attachment image onto its
+    // own line, so any content re-serialized after it (here " E2 ...") gains a leading \n.
     await waitFor(() => expect(screen.getByTestId("serialized").textContent).toBe(
-      "![proof](api/attachments/attachment-1/content) E2 "
+      "![proof](api/attachments/attachment-1/content)\n E2 "
       + "[@任务总管](taskboard://composer-reference/v1/agent/bWFzdGVy) ",
     ));
   });
@@ -235,7 +237,7 @@ describe("InlineMediaComposer completion references", () => {
     fireEvent.keyDown(editor, { key: "Enter" });
 
     await waitFor(() => expect(screen.getByTestId("serialized").textContent).toBe(
-      "![proof](api/attachments/attachment-1/content) /review ",
+      "![proof](api/attachments/attachment-1/content)\n /review ",
     ));
   });
 

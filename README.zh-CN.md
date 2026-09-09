@@ -48,7 +48,7 @@ npm run taskctl -- issue create \
   --labels product,mvp
 ```
 
-请运行 `npm link`，以便在 shell 路径中使用 `taskctl`。设置 `CODEX_TASKBOARD_URL`，可让 CLI 指向另一个本地或局域网服务。云端部署通过**回环 companion**（本机 loopback 配套服务，不是「伴侣」）使用 `taskctl cloud login` 配置。
+请运行 `npm link`，以便在 shell 路径中使用 `taskctl`。设置 `CODEX_TASKBOARD_URL`，可让 CLI 指向另一个本地或局域网服务。
 
 ## 安装 Codex Skill
 
@@ -183,13 +183,17 @@ npm run codex:inject -- --port 9229 --open
 
 局域网模式没有账户身份验证：受信任本地网络中任何能访问该 URL 的人都可以读取和写入 Taskboard。公网和云端部署需要经过身份验证的部署边界。
 
-## 通过 Cloudflare 共享
+## 共享云端看板（已退场）
 
-对于两名受信任的协作者，Taskboard 可以在 Cloudflare 上运行，使用 Worker Static Assets 和 API 路由，以 D1 作为权威业务数据库，并使用私有 R2 bucket 存储附件。该部署使用带共享密码的 HTTPS Basic 身份验证，并在全局修订号变化后刷新已打开的面板。
+基于 Cloudflare 的共享看板功能（Worker Static Assets、D1、R2、两名协作者之间的 HTTPS Basic 身份验证）已经退场。Codex Taskboard 现在仅支持本机优先模式，不再有云端写入路径。
 
-每台设备保留自己的项目检出映射，并继续使用**本地 companion**（本机配套服务 / 环回代理）提供 Codex、Git/worktree、Skill 和 MCP 能力。请勿将 companion 译为「伴侣」，也不要把普通 Taskboard HTTP 接口称为「伴侣 API」。云端模式绝不会回退到本地 SQLite 数据库，也不会同时写入本地数据库。
+如果你有既有的共享云端看板，可以用以下命令将其数据导出到本机项目：
 
-请参阅[云端协作](docs/cloud-collaboration.md)，了解所有者部署、现有 GitHub 安装设置、密码轮换、本地路径映射和一次性本地数据迁移流程。
+```bash
+taskctl cloud migrate --project PROJECT_ID [--dry-run] [--cloud-config FILE] [--state-file FILE]
+```
+
+建议先加上 `--dry-run` 预览将导入的 tasks、comments 与 attachments 清单。该迁移具备幂等性——部分失败后重新执行不会产生重复记录。
 
 ## 验证
 

@@ -25,7 +25,6 @@ import {
   deleteProject as deleteProjectRequest,
   getAiChatCatalog,
   getCodexThreadProgress,
-  getHostRuntime,
   getJiraConnection,
   getTaskboardRevision,
   getTaskboardMetadata,
@@ -372,7 +371,7 @@ function getInitialTheme(): Theme {
   const host = query.get("host");
   if (
     window.parent !== window
-    && (host === "codex" || host === "workbuddy" || host === "deepseek-harness")
+    && host === "codex"
   ) {
     const fromQuery = query.get("theme");
     if (isTheme(fromQuery)) return fromQuery;
@@ -682,7 +681,7 @@ function LocalRealtimeSync({
 export function App() {
   const query = useMemo(() => new URL(document.baseURI).searchParams, []);
   const host = query.get("host");
-  const embedded = host === "codex" || host === "workbuddy" || host === "deepseek-harness";
+  const embedded = host === "codex";
   const undoShortcut = navigator.userAgent.includes("Macintosh") ? "⌘Z" : "Ctrl+Z";
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [hostContext, setHostContext] = useState<HostContext | null>(null);
@@ -866,7 +865,8 @@ export function App() {
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const isAllProjects = selectedProjectId === ALL_PROJECTS_ID;
-  const isJiraProject = selectedProject?.source === "jira";
+  // Name kept for diff minimalism; now capability-derived rather than a literal "jira" check.
+  const isJiraProject = selectedProject?.capabilities.createIssue === false;
   const boardDisplaySettings = projectBoardDisplaySettings[selectedProjectId]
     ?? DEFAULT_BOARD_DISPLAY_SETTINGS;
   const automationModels = automationCatalog && automationCatalog.projectId === selectedProject?.id
@@ -1137,7 +1137,7 @@ export function App() {
   const developmentEditorProjectId = isAllProjects && editor ? editorProjectId : null;
   const createTargetProjects = projectChoices.flatMap((choice) => {
     const project = projects.find((candidate) => candidate.id === choice.id);
-    return project && project.source !== "jira"
+    return project && project.capabilities.createIssue
       ? [{ id: choice.id, name: choice.name }]
       : [];
   });
@@ -1746,23 +1746,6 @@ export function App() {
     };
   }, [embedded, host]);
 
-  useEffect(() => {
-    if (host !== "workbuddy") return;
-    let disposed = false;
-    const syncRuntime = async () => {
-      try {
-        const runtime = await getHostRuntime();
-        if (!disposed) setHostContext(runtime);
-      } catch {}
-    };
-    void syncRuntime();
-    const timer = window.setInterval(syncRuntime, 1_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [host]);
-
   useLayoutEffect(() => {
     if (!embedded || window.parent === window || !dragRegionRef.current) return;
     const region = dragRegionRef.current;
@@ -1912,7 +1895,7 @@ export function App() {
       setTasks(sortTasks(nextTasks));
       setArchivedTasks(sortTasks(nextArchivedTasks));
       setProjects((current) => current.map((project) => {
-        if (project.id !== projectId || project.source !== "jira") return project;
+        if (project.id !== projectId || !project.isProviderManaged) return project;
         const labels = [...new Set(nextTasks.flatMap((task) => task.labels))];
         return JSON.stringify(labels) === JSON.stringify(project.labels)
           ? project
@@ -1946,12 +1929,14 @@ export function App() {
 
   useEffect(() => {
     const isAllProjectTaskScope = taskScopeProjectId === ALL_PROJECTS_ID;
-    if ((!isJiraProject && !(isAllProjectTaskScope && jiraConnection?.configured)) || !taskScopeProjectId) return;
+    // No incrementalSync means the provider never pushes changes to us, so we must poll.
+    const providerNeedsPolling = !(selectedProject?.capabilities.incrementalSync ?? true);
+    if ((!providerNeedsPolling && !(isAllProjectTaskScope && jiraConnection?.configured)) || !taskScopeProjectId) return;
     const timer = window.setInterval(() => {
       void refreshTasks(taskScopeProjectId, { quiet: true });
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [isJiraProject, jiraConnection?.configured, refreshTasks, taskScopeProjectId]);
+  }, [selectedProject?.capabilities.incrementalSync, jiraConnection?.configured, refreshTasks, taskScopeProjectId]);
 
   useEffect(() => {
     const standalone = !embedded || window.parent === window;
@@ -3239,7 +3224,7 @@ export function App() {
   return (
     <TaskboardLanguageProvider language={language}>
       <div className={`app-shell${embedded ? " embedded" : ""}`} style={appShellStyle}>
-      {taskboardMetadata && taskboardMetadata.mode !== "cloud" && (
+      {taskboardMetadata && (
         <LocalRealtimeSync
           selectedProjectId={taskScopeProjectId}
           detailTaskId={detailTaskId}
@@ -3418,7 +3403,7 @@ export function App() {
                 onChange={(options) => void saveProjectAutomation(options)}
               />
             )}
-            {isJiraProject && (
+            {selectedProject?.capabilities.webhook === false && (
               <button
                 className="icon-button"
                 type="button"

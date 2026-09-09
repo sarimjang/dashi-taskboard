@@ -371,12 +371,6 @@ jobs:
           RELEASE_ROOT="$BUNDLE_ROOT/release"
           npm run app:verify-release -- "$APP_PATH" "$DMG_PATH" "$RELEASE_ROOT" "$RELEASE_TAG"
 
-      - name: Restore unsigned Windows x64 Preview
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: windows-preview-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-preview
-
       - name: Restore Ubuntu 24.04 x64 release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -420,9 +414,6 @@ jobs:
           cp "$BUNDLE_ROOT/release/Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz.sig" "$RELEASE_ASSETS/"
           cp "$BUNDLE_ROOT/release/latest.json" "$RELEASE_ASSETS/"
           cp \
-            "$RUNNER_TEMP/windows-preview/Codex Taskboard_${PACKAGE_VERSION}_x64-setup.exe" \
-            "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe"
-          cp \
             "$RUNNER_TEMP/linux-release/Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.deb" \
             "$RELEASE_ASSETS/"
           cp \
@@ -442,7 +433,6 @@ jobs:
               "Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.deb.sig" \
               "Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage" \
               "Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage.sig" \
-              "Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe" \
               "Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz" \
               "Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz.sig" \
               "latest.json" > "$MANIFEST_ROOT/release-assets.sha256"
@@ -481,9 +471,6 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage.sig"
-          gh release upload "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe"
           gh release upload "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz"

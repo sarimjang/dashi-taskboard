@@ -909,7 +909,6 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
       "-s", "workspace-write",
       "-c", 'approval_policy="on-request"',
       "-c", 'approvals_reviewer="auto_review"',
-      "--add-dir", fixture.otherWorkspace,
       "-m", "gpt-real",
       "-c", 'model_reasoning_effort="high"',
       "-",
@@ -926,7 +925,6 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
       "-s", "workspace-write",
       "-c", 'approval_policy="on-request"',
       "-c", 'approvals_reviewer="auto_review"',
-      "--add-dir", fixture.otherWorkspace,
       "-m", "gpt-real",
       "-c", 'model_reasoning_effort="high"',
       "resume", "codex-thread-1", "-",
@@ -946,6 +944,36 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
     );
     assert.equal(persisted.includes("<taskboard_context>"), false);
     assert.equal(persisted.includes("SECRET REASONING"), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("read-only AI turns are spawned with the read-only codex sandbox, not workspace-write (CWE-250)", async () => {
+  const fixture = await createFixture();
+  try {
+    const thread = await fixture.service.createThread({
+      projectId: "project",
+      model: "gpt-real",
+      reasoningEffort: "high",
+      sandbox: "read-only",
+    });
+
+    const turn = await fixture.service.startTurn(thread.id, { message: "first" });
+    await waitFor(() => fixture.service.getRun(turn.id)?.status !== "running");
+
+    const captures = (await readFile(fixture.capturePath, "utf8")).trim().split("\n").map(JSON.parse);
+    // No --add-dir: resolvedWorkspace() always returns addDirectories: [] (CWE-863).
+    assert.deepEqual(captures[0].args, [
+      "exec", "--json", "--color", "never",
+      "-C", fixture.workspace,
+      "-s", "read-only",
+      "-c", 'approval_policy="on-request"',
+      "-c", 'approvals_reviewer="user"',
+      "-m", "gpt-real",
+      "-c", 'model_reasoning_effort="high"',
+      "-",
+    ]);
   } finally {
     await fixture.close();
   }

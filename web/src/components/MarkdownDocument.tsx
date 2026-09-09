@@ -18,6 +18,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { resolvePersistedAttachmentUrl } from "../api";
 import { useTaskboardI18n } from "../i18n";
+import { classifyMediaUrl } from "../mediaAccessPolicy";
 
 interface MarkdownAstNode {
   type: string;
@@ -502,6 +503,47 @@ function MarkdownPre({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
   return <pre {...props}>{children}</pre>;
 }
 
+export function MarkdownImage({
+  src,
+  markdown,
+  ...props
+}: ComponentPropsWithoutRef<"img"> & { markdown?: string }) {
+  const { text } = useTaskboardI18n();
+  const [revealed, setRevealed] = useState(false);
+  const decision = classifyMediaUrl(src ?? "");
+
+  if (decision === "blocked") {
+    return (
+      <span
+        className="markdown-image-gate is-blocked"
+        data-taskboard-inline-media-markdown={markdown}
+        role="img"
+        aria-label={text(
+          "已阻止加载指向内部网络地址的图片",
+          "Blocked an image pointing at an internal network address",
+        )}
+      >
+        {text("图片已阻止", "Image blocked")}
+      </span>
+    );
+  }
+
+  if (decision === "external" && !revealed) {
+    return (
+      <button
+        type="button"
+        className="markdown-image-gate"
+        data-taskboard-inline-media-markdown={markdown}
+        onClick={() => setRevealed(true)}
+      >
+        {text("点击加载外部图片", "Click to load external image")}
+      </button>
+    );
+  }
+
+  return <img {...props} src={src} data-taskboard-inline-media-markdown={markdown} />;
+}
+
 export function MarkdownDocument({
   value,
   onCopy,
@@ -554,12 +596,7 @@ export function MarkdownDocument({
               && /^!\[(?:\\.|[^\]])*\]\(/.test(markdown)
               ? markdown
               : undefined;
-            return (
-              <img
-                {...props}
-                data-taskboard-inline-media-markdown={selfContainedMarkdown}
-              />
-            );
+            return <MarkdownImage {...props} markdown={selfContainedMarkdown} />;
           },
           pre: MarkdownPre,
         }}

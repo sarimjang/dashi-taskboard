@@ -3,8 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { chmod, lstat, mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -34,11 +33,6 @@ import {
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
 const defaultCodexDebuggingPort = 9229;
-const independentCodexProfilePath = process.env.CODEX_TASKBOARD_CODEX_PROFILE
-  ? path.resolve(process.env.CODEX_TASKBOARD_CODEX_PROFILE)
-  : process.platform === "linux"
-    ? path.join(os.tmpdir(), "codex-taskboard-independent-profile-v2")
-    : "/private/tmp/codex-taskboard-independent-profile-v2";
 const sourceCodexProfilePath = process.env.CODEX_TASKBOARD_CODEX_SOURCE_PROFILE
   ? path.resolve(process.env.CODEX_TASKBOARD_CODEX_SOURCE_PROFILE)
   : null;
@@ -253,8 +247,80 @@ async function removeTaskboardRuntime() {
   }
 }
 
+const codexProfileDirectoryNamePattern = /^[a-f0-9]{32}$/;
+
+async function ensureOwnedPrivateDirectory(directoryPath) {
+  let info;
+  try {
+    info = await lstat(directoryPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    await mkdir(directoryPath, { mode: 0o700 });
+    info = await lstat(directoryPath);
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(
+      `Refusing to use Codex profile path ${directoryPath}: expected a private directory, `
+      + `found ${info.isSymbolicLink() ? "a symlink" : "a non-directory entry"}`,
+    );
+  }
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error(`Refusing to use Codex profile path ${directoryPath}: not owned by the current user`);
+  }
+  if ((info.mode & 0o077) !== 0) {
+    throw new Error(
+      `Refusing to use Codex profile path ${directoryPath}: expected permissions 0700, `
+      + `found 0${(info.mode & 0o777).toString(8)}`,
+    );
+  }
+  return directoryPath;
+}
+
+async function loadOrCreateCodexProfileDirectoryName() {
+  const metadataPath = path.join(taskboardDataDirectory, "codex-profile-directory.json");
+  try {
+    const stored = JSON.parse(await readFile(metadataPath, "utf8"));
+    if (
+      typeof stored?.directoryName === "string"
+      && codexProfileDirectoryNamePattern.test(stored.directoryName)
+    ) {
+      return stored.directoryName;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const directoryName = randomBytes(16).toString("hex");
+  const temporaryPath = `${metadataPath}.${process.pid}.tmp`;
+  await writeFile(
+    temporaryPath,
+    `${JSON.stringify({ version: 1, directoryName })}\n`,
+    { mode: 0o600 },
+  );
+  await rename(temporaryPath, metadataPath);
+  return directoryName;
+}
+
+async function computeIndependentCodexProfilePath() {
+  if (process.env.CODEX_TASKBOARD_CODEX_PROFILE) {
+    return ensureOwnedPrivateDirectory(path.resolve(process.env.CODEX_TASKBOARD_CODEX_PROFILE));
+  }
+  await ensureOwnedPrivateDirectory(taskboardDataDirectory);
+  const directoryName = await loadOrCreateCodexProfileDirectoryName();
+  return ensureOwnedPrivateDirectory(
+    path.join(taskboardDataDirectory, `codex-profile-${directoryName}`),
+  );
+}
+
+let independentCodexProfilePathPromise = null;
+function resolveIndependentCodexProfilePath() {
+  independentCodexProfilePathPromise ??= computeIndependentCodexProfilePath();
+  return independentCodexProfilePathPromise;
+}
+
 async function importCodexBrowserProfile() {
-  if (!sourceCodexProfilePath || sourceCodexProfilePath === independentCodexProfilePath) return;
+  if (!sourceCodexProfilePath) return;
+  const independentCodexProfilePath = await resolveIndependentCodexProfilePath();
+  if (sourceCodexProfilePath === independentCodexProfilePath) return;
   const markerPath = path.join(
     independentCodexProfilePath,
     ".codex-taskboard-browser-profile-imported-v1",
@@ -334,15 +400,16 @@ function codexAppProcesses(appPath) {
   return matches;
 }
 
-function managedCodexProcesses(appPath) {
+async function managedCodexProcesses(appPath) {
+  const independentCodexProfilePath = await resolveIndependentCodexProfilePath();
   const profileArgument = `--user-data-dir=${independentCodexProfilePath}`;
   return codexAppProcesses(appPath).filter((record) => (
     record.command.includes(` ${profileArgument} `)
   ));
 }
 
-function managedCodexProcess(appPath) {
-  const processes = managedCodexProcesses(appPath);
+async function managedCodexProcess(appPath) {
+  const processes = await managedCodexProcesses(appPath);
   if (processes.length > 1) throw new Error("Multiple managed Codex processes are running");
   return processes[0] ?? null;
 }
@@ -371,7 +438,8 @@ function isManagedCodexRunning(record) {
 }
 
 async function launchCodexWithLaunchServices(appPath, port, shouldStop = () => false) {
-  const existing = managedCodexProcess(appPath);
+  const independentCodexProfilePath = await resolveIndependentCodexProfilePath();
+  const existing = await managedCodexProcess(appPath);
   if (existing && managedCodexUsesPort(existing, port)) return existing;
   if (existing) await stopManagedCodex(existing);
   if (shouldStop()) throw new Error("Managed Codex launch stopped");
@@ -406,7 +474,7 @@ async function launchCodexWithLaunchServices(appPath, port, shouldStop = () => f
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const launched = managedCodexProcess(appPath);
+    const launched = await managedCodexProcess(appPath);
     if (launched && managedCodexUsesPort(launched, port)) return launched;
     if (launched) throw new Error("LaunchServices started Codex on an unexpected CDP port");
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -458,6 +526,7 @@ function activateCodexApp(pid) {
 }
 
 async function launchCodexWithPipe(appPath) {
+  const independentCodexProfilePath = await resolveIndependentCodexProfilePath();
   const child = spawn(
     codexExecutablePath(appPath),
     [
@@ -2317,7 +2386,7 @@ async function main() {
       const launchedCodex = codexProcess;
       let launchedManagedCodex = managedCodex;
       if (!launchedManagedCodex && !options.cdpPipe) {
-        const discovered = managedCodexProcess(options.appPath);
+        const discovered = await managedCodexProcess(options.appPath);
         if (discovered && managedCodexUsesPort(discovered, options.port)) {
           launchedManagedCodex = discovered;
         }
@@ -2383,7 +2452,7 @@ async function main() {
         if (!runningCodex || (await codexTargets(options.port)).length === 0) {
           throw new Error(`Codex CDP port ${options.port} belongs to another process`);
         }
-        managedCodex = managedCodexProcesses(options.appPath)
+        managedCodex = (await managedCodexProcesses(options.appPath))
           .find((record) => record.pid === runningCodex.pid) ?? null;
         codexAppPid = runningCodex.pid;
         if (!managedCodex) {

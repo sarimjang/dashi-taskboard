@@ -3,6 +3,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { resolvePersistedAttachmentUrl } from "../api";
+import { classifyMediaUrl } from "../mediaAccessPolicy";
 import {
   TASK_PRIORITIES,
   type ActorIdentity,
@@ -113,7 +114,10 @@ function firstTaskImage(task: Task) {
   return source ? resolvePersistedAttachmentUrl(source) : null;
 }
 
-function TaskCardMedia({ src }: { src: string }) {
+export function TaskCardMedia({ src }: { src: string }) {
+  const { text } = useTaskboardI18n();
+  const decision = useMemo(() => classifyMediaUrl(src), [src]);
+  const [revealed, setRevealed] = useState(false);
   const mediaRef = useRef<HTMLDivElement>(null);
   const imageSizeRef = useRef<{ naturalWidth: number; naturalHeight: number } | null>(null);
   const [presentation, setPresentation] = useState<{ width: number; clamped: boolean } | null>(null);
@@ -142,24 +146,40 @@ function TaskCardMedia({ src }: { src: string }) {
     return () => observer.disconnect();
   }, [updatePresentation]);
 
+  if (decision === "blocked") return null;
+  const showImage = decision === "attachment" || revealed;
+
   return (
     <div
       ref={mediaRef}
       className={`task-card-media${clamped ? " is-clamped" : ""}`}
       style={presentation ? { width: presentation.width } : undefined}
     >
-      <img
-        src={src}
-        alt=""
-        loading="lazy"
-        onLoad={(event) => {
-          imageSizeRef.current = {
-            naturalWidth: event.currentTarget.naturalWidth,
-            naturalHeight: event.currentTarget.naturalHeight,
-          };
-          updatePresentation();
-        }}
-      />
+      {showImage ? (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          onLoad={(event) => {
+            imageSizeRef.current = {
+              naturalWidth: event.currentTarget.naturalWidth,
+              naturalHeight: event.currentTarget.naturalHeight,
+            };
+            updatePresentation();
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="task-card-media-gate"
+          onClick={(event) => {
+            event.stopPropagation();
+            setRevealed(true);
+          }}
+        >
+          {text("点击加载图片", "Click to load image")}
+        </button>
+      )}
     </div>
   );
 }
@@ -497,7 +517,7 @@ export function TaskCard({
               task={task}
               participants={task.participants.length ? task.participants : [creator]}
               currentUser={currentUser}
-              disabled={propertyDisabled || task.source === "jira"}
+              disabled={propertyDisabled || !task.capabilities.assigneeEdit}
               open={propertyMenu === "assignee"}
               onOpenChange={(open) => setPropertyMenu(open ? "assignee" : null)}
               onChange={(assigneeTarget) => updateProperty({ assigneeTarget }, "assignee")}
@@ -561,7 +581,7 @@ export function TaskCard({
               task={task}
               participants={task.participants}
               currentUser={currentUser}
-              disabled={propertyDisabled || task.source === "jira"}
+              disabled={propertyDisabled || !task.capabilities.assigneeEdit}
               open={propertyMenu === "assignee"}
               onOpenChange={(open) => setPropertyMenu(open ? "assignee" : null)}
               onChange={(assigneeTarget) => updateProperty({ assigneeTarget }, "assignee")}

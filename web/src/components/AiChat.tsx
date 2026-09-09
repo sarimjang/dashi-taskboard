@@ -71,6 +71,7 @@ import type {
 } from "../types";
 import { COMPOSER_CONTRACT_VERSION } from "../types";
 import { LinearIcon } from "./LinearIcon";
+import { MarkdownImage } from "./MarkdownDocument";
 import {
   AttachmentIcon,
   ConversationIcon,
@@ -965,7 +966,7 @@ function activityDetailSummary(
   return text("查看详情", "View details");
 }
 
-function MarkdownMessage({
+export function MarkdownMessage({
   children,
   skillsById,
 }: {
@@ -984,6 +985,7 @@ function MarkdownMessage({
             }
             return <a {...props} href={href} target="_blank" rel="noreferrer" />;
           },
+          img: ({ node: _node, ...props }) => <MarkdownImage {...props} />,
         }}
       >
         {children}

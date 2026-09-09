@@ -702,6 +702,21 @@ function threadBindingFromRow(row) {
   };
 }
 
+// CWE-200: for a "local" binding, workspacePath is the creator's own absolute
+// filesystem path (leaks directory structure / OS username) and codexHostId is
+// always the constant "local" (no identifying value). Neither is ever read by
+// any client matching logic for local bindings (only threadId is used to open
+// the codex:// deep link), so redact workspacePath before it reaches the API
+// response for every viewer, not just non-creators. "remote" bindings are left
+// untouched: codexHostId/workspacePath there identify a shared SSH host/path
+// (not an individual's own machine) and the web client relies on the real
+// values, for any project collaborator, to detect whether a remote thread can
+// be reopened from their own device (see openThread() in web/src/App.tsx).
+function redactThreadBindingForResponse(binding) {
+  if (!binding || binding.codexProjectKind !== "local") return binding;
+  return { ...binding, workspacePath: null };
+}
+
 function legacyLocalThreadIdFromRow(row) {
   if (!row.thread_id) return null;
   return [
@@ -772,6 +787,7 @@ function attachTaskActivity(task, comments, activities, previewImage = null) {
       avatarUrl: activity.actor_avatar_url,
     });
   }
+  task.threadBinding = redactThreadBindingForResponse(task.threadBinding);
   const conversationRefs = [];
   if (task.threadBinding) {
     conversationRefs.push({
@@ -792,7 +808,7 @@ function attachTaskActivity(task, comments, activities, previewImage = null) {
     });
   }
   for (const comment of orderedComments) {
-    const threadBinding = threadBindingFromRow(comment);
+    const threadBinding = redactThreadBindingForResponse(threadBindingFromRow(comment));
     const legacyLocalThreadId = legacyLocalThreadIdFromRow(comment);
     if (threadBinding || legacyLocalThreadId) {
       conversationRefs.push({
@@ -1065,7 +1081,9 @@ async function attachmentsByCommentIdForTask(env, taskId) {
 
 async function hydrateComment(env, row, attachmentsOverride) {
   const attachments = attachmentsOverride ?? (await attachmentsForComment(env, row.id));
-  return commentFromRow(row, attachments);
+  const comment = commentFromRow(row, attachments);
+  comment.threadBinding = redactThreadBindingForResponse(comment.threadBinding);
+  return comment;
 }
 
 async function hydrateTask(env, row, activityComments = null, activityChanges = null) {
@@ -1658,17 +1676,22 @@ async function deleteProject(env, id) {
   if (!id.startsWith("temp-")) {
     throw new ApiError(403, "PROJECT_DELETE_FORBIDDEN", "Only manually created projects can be deleted");
   }
-  const result = await env.DB.prepare(`
-    DELETE FROM projects
-    WHERE id = ?
-      AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
-  `).bind(id, id).run();
-  if (!changed(result)) {
+  const results = await env.DB.batch([
+    env.DB.prepare("SELECT id FROM project_readme_attachments WHERE project_id = ?").bind(id),
+    env.DB.prepare(`
+      DELETE FROM projects
+      WHERE id = ?
+        AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
+    `).bind(id, id),
+  ]);
+  if (!changed(results[1])) {
     const issueCount = Number(await env.DB.prepare(`
       SELECT COUNT(*) AS issue_count FROM tasks WHERE project_id = ?
     `).bind(id).first("issue_count"));
     throw new ApiError(409, "PROJECT_NOT_EMPTY", "Project still contains issues", { issueCount });
   }
+  const attachmentIds = results[0].results.map((attachment) => attachment.id);
+  await Promise.all(attachmentIds.map((attachmentId) => env.ATTACHMENTS.delete(attachmentId)));
   return project;
 }
 

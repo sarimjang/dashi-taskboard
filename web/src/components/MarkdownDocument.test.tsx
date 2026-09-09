@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownDocument } from "./MarkdownDocument";
 
@@ -135,5 +135,31 @@ describe("MarkdownDocument", () => {
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(document.querySelector('.markdown-mermaid[role="img"]')).toBeNull();
+  });
+
+  it("renders a Taskboard attachment image immediately, with no click required", () => {
+    render(<MarkdownDocument value="![cover](api/attachments/abc-123/content)" />);
+
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("api/attachments/abc-123/content");
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("gates an external image behind a click before it produces a network request", () => {
+    render(<MarkdownDocument value="![pixel](https://tracker.invalid/pixel.png)" />);
+
+    expect(document.querySelector("img")).toBeNull();
+    const gate = screen.getByRole("button");
+
+    fireEvent.click(gate);
+
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("https://tracker.invalid/pixel.png");
+  });
+
+  it("blocks an image pointing at a loopback or private network destination outright", () => {
+    render(<MarkdownDocument value="![probe](http://169.254.169.254/latest/meta-data/)" />);
+
+    expect(document.querySelector("img")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByRole("img", { name: /blocked|已阻止/i })).toBeTruthy();
   });
 });

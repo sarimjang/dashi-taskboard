@@ -73,6 +73,7 @@ Dashi-taskboard server 目前的 host 解析函式 `resolveHost` 預設綁定所
 - `test/server.test.mjs` 中「一般 API 對 LAN client 可用」與「LAN client 間廣播任務變更」的既有測試案例被改寫，反映「未開啟旗標時 LAN 不可達、開啟後需通過驗證」的新行為，且改寫後的測試通過。
 - 新增測試涵蓋：LAN 旗標關閉時的連線不可達性；LAN 旗標開啟後 HTTP、SSE、WebSocket 三種連線方式在未驗證時一致被拒絕；LAN 來源攜帶 `X-Taskboard-User-*` 標頭時身份仍解析為匿名本地使用者；機器層級 metadata 與 capability 路由在 LAN 旗標開啟且已驗證的情況下仍拒絕非 loopback 來源。
 - Standalone、Tauri Launcher、Codex injector 三種佈署形態都完整跑過上述測試，確認三者共用的 host 解析與驗證路徑行為一致。
+- **例外（lsb-review 修復後補註）**：`/api/events` 的 WebSocket upgrade 本質是 cloud-relay 專用端點，既有 HTTP/SSE 邏輯（cloud 模式下對所有 `/api/*` 無條件要求 loopback-only，`/api/events` 不在其 local-companion 白名單內）已經把它限定在 loopback-only；本 repo 目前沒有非 cloud 用途的 WS 端點，因此第 15 行「HTTP、SSE、WebSocket 三種連線方式套用同一組身份驗證要求」與上一條「未驗證時一致被拒絕」僅涵蓋未驗證情境——已驗證的 LAN+token 呼叫端不適用於 WS upgrade，WS upgrade 維持無條件 loopback-only，不套用 LAN+token 放寬。
 
 **範圍邊界（Scope boundaries）：**
 

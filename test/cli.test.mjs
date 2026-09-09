@@ -79,6 +79,53 @@ test("CODEX_TASKBOARD_URL overrides the service origin", async () => {
   assert.equal(requestedUrl.toString(), "https://tasks.example.test/api/projects");
 });
 
+test("CODEX_TASKBOARD_URL rejects plaintext HTTP for a non-loopback host", async () => {
+  const result = await run(
+    ["project", "list", "--json"],
+    async () => assert.fail("fetch should not be called"),
+    { env: { CODEX_TASKBOARD_URL: "http://tasks.example.test/" } },
+  );
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.stderr.error.code, "USAGE_ERROR");
+  assert.match(result.stderr.error.message, /HTTPS/);
+});
+
+test("CODEX_TASKBOARD_URL allows plaintext HTTP for a non-loopback host with explicit opt-in", async () => {
+  let requestedUrl;
+  const result = await run(
+    ["project", "list", "--json"],
+    async (url) => {
+      requestedUrl = url;
+      return response({ projects: [] });
+    },
+    {
+      env: {
+        CODEX_TASKBOARD_URL: "http://tasks.example.test/",
+        CODEX_TASKBOARD_ALLOW_INSECURE_REMOTE: "1",
+      },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(requestedUrl.toString(), "http://tasks.example.test/api/projects");
+});
+
+test("CODEX_TASKBOARD_URL keeps allowing plaintext HTTP for loopback hosts without opt-in", async () => {
+  let requestedUrl;
+  const result = await run(
+    ["project", "list", "--json"],
+    async (url) => {
+      requestedUrl = url;
+      return response({ projects: [] });
+    },
+    { env: { CODEX_TASKBOARD_URL: "http://localhost:51550" } },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(requestedUrl.toString(), "http://localhost:51550/api/projects");
+});
+
 test("--runtime-file reads the launcher endpoint without a leading environment assignment", async () => {
   let requestedUrl;
   const result = await run(

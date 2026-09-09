@@ -16,6 +16,25 @@ export type AssigneeTarget = "current-user" | "codex-agent";
 export type IssueRelationType = "parent" | "blocks" | "blocked_by" | "related";
 export type IssueRelationOrigin = "manual" | "mention";
 
+export type ProviderAccessLevel = "none" | "read" | "read-write";
+
+// Mirrors server/provider-registry.mjs ProviderCapabilities — field-for-field,
+// not a frontend-specific redesign. See openspec/changes/provider-contract-abstraction/design.md.
+export interface ProviderCapabilities {
+  createIssue: boolean;
+  updateAssignee: boolean;
+  comments: ProviderAccessLevel;
+  attachments: ProviderAccessLevel;
+  relations: ProviderAccessLevel;
+  webhook: boolean;
+  incrementalSync: boolean;
+  manualArchive: boolean;
+  manualDelete: boolean;
+  manualMove: boolean;
+  assigneeEdit: boolean;
+  projectReassign: boolean;
+}
+
 export interface ActorIdentity {
   type: ActorType;
   id: string;
@@ -334,6 +353,8 @@ export interface Project {
   name: string;
   workspacePath: string | null;
   source: "local" | "jira";
+  capabilities: ProviderCapabilities;
+  isProviderManaged: boolean;
   labels: string[];
   issueCount: number;
   createdAt: string;
@@ -426,6 +447,8 @@ export interface Task {
   dueDate: string | null;
   recurrence: Recurrence | null;
   source: "local" | "jira";
+  capabilities: ProviderCapabilities;
+  isProviderManaged: boolean;
   externalOrigin?: string | null;
   externalKey?: string | null;
   externalUrl: string | null;

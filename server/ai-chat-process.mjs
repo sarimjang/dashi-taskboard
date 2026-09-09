@@ -166,7 +166,7 @@ function normalizedItem(rawType, item) {
 export function buildCodexArgs(thread, addDirectories, imagePaths = []) {
   const permission = thread.sandbox === "read-only"
     ? {
-        sandbox: "workspace-write",
+        sandbox: "read-only",
         approvalPolicy: "on-request",
         reviewer: "user",
       }

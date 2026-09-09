@@ -307,6 +307,77 @@ test("remote thread identity survives controller moves and clears after create f
   assert.deepEqual(todo.body.task.conversationRefs.map((ref) => ref.threadId), ["controller-thread"]);
 });
 
+test("local thread bindings never expose the creator's workspace path, remote bindings still do", async () => {
+  await createProject("thread-binding-privacy");
+  const localBinding = {
+    threadId: "local-thread-a",
+    codexProjectId: "local-project-a",
+    codexProjectKind: "local",
+    codexHostId: "local",
+    workspacePath: "/Users/alice/secret-project",
+  };
+  const created = await createTask("thread-binding-privacy", "Local binding", alice, {
+    threadId: localBinding.threadId,
+    threadBinding: localBinding,
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  // Even the actor who set the binding never gets the local workspace path back.
+  assert.equal(created.body.task.threadBinding.workspacePath, null);
+  assert.equal(created.body.task.threadBinding.codexHostId, "local");
+  assert.equal(created.body.task.threadBinding.threadId, localBinding.threadId);
+  assert.equal(created.body.task.threadBinding.codexProjectId, localBinding.codexProjectId);
+  assert.equal(created.body.task.conversationRefs[0].workspacePath, null);
+
+  const commentWithLocalBinding = await cloud.request(
+    `/api/tasks/${created.body.task.id}/comments`,
+    {
+      method: "POST",
+      actorName: bob,
+      json: {
+        body: "Local comment thread",
+        threadBinding: { ...localBinding, threadId: "local-thread-comment" },
+      },
+    },
+  );
+  assert.equal(
+    commentWithLocalBinding.response.status,
+    201,
+    JSON.stringify(commentWithLocalBinding.body),
+  );
+  assert.equal(commentWithLocalBinding.body.comment.threadBinding.workspacePath, null);
+
+  // A different collaborator reading the task afterwards still sees no workspace path,
+  // for either the task's own binding or the comment's.
+  const readByOther = await cloud.request(`/api/tasks/${created.body.task.id}`, {
+    actorName: bob,
+  });
+  assert.equal(readByOther.response.status, 200);
+  assert.equal(readByOther.body.task.threadBinding.workspacePath, null);
+  assert.equal(readByOther.body.task.conversationRefs.length, 2);
+  assert.ok(readByOther.body.task.conversationRefs.every((ref) => ref.workspacePath === null));
+
+  // Remote bindings keep their real host/workspace identity for every viewer: the
+  // web client needs those values, for any project collaborator, to detect whether
+  // an SSH remote thread can be reopened from that viewer's own device.
+  const remoteBinding = {
+    threadId: "remote-thread-privacy",
+    codexProjectId: "remote-project-privacy",
+    codexProjectKind: "remote",
+    codexHostId: "ssh-shared-box",
+    workspacePath: "/srv/shared/privacy-project",
+  };
+  const remoteCreated = await createTask("thread-binding-privacy", "Remote binding", alice, {
+    threadId: remoteBinding.threadId,
+    threadBinding: remoteBinding,
+  });
+  assert.equal(remoteCreated.response.status, 201, JSON.stringify(remoteCreated.body));
+  const remoteReadByOther = await cloud.request(`/api/tasks/${remoteCreated.body.task.id}`, {
+    actorName: bob,
+  });
+  assert.equal(remoteReadByOther.response.status, 200);
+  assert.deepEqual(remoteReadByOther.body.task.threadBinding, remoteBinding);
+});
+
 test("PATCH rejects moving an issue that still has relations", async () => {
   await createProject("move-related-cloud-source");
   await createProject("move-related-cloud-target");

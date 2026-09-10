@@ -26,6 +26,13 @@ async function requireCloudImplementation() {
 
 export async function createCloudWorkerHarness({
   sharedSecret = "two-person-shared-secret",
+  // Optional Miniflare `serviceBindings` function handlers, keyed by binding name (e.g.
+  // `RACE_TEST_HOOK`). Miniflare runs a function-handler binding in the same Node process, so
+  // the worker's `await env.<NAME>.fetch(...)` blocks until this handler's promise resolves —
+  // used by race-condition regression tests to inject a deterministic concurrent mutation at an
+  // exact point inside a worker request instead of racing real HTTP requests against it. Not
+  // declared in wrangler.jsonc, so these bindings are always undefined outside tests.
+  serviceBindings,
 } = {}) {
   await requireCloudImplementation();
   const persistenceRoot = await mkdtemp(path.join(os.tmpdir(), "taskboard-cloud-worker-"));
@@ -43,6 +50,7 @@ export async function createCloudWorkerHarness({
     durableObjects: {
       REALTIME_HUB: { className: "RealtimeHub", useSQLite: true },
     },
+    ...(serviceBindings ? { serviceBindings } : {}),
     defaultPersistRoot: persistenceRoot,
     d1Persist: true,
     r2Persist: true,

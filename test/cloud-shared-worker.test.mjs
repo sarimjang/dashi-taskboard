@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 
 import { createCloudWorkerHarness } from "./helpers/cloud-worker-harness.mjs";
@@ -682,6 +683,356 @@ test("deleting an empty project also cleans up its R2 README attachment", async 
   );
   assert.equal(await cloud.attachments.get(attachmentId), null);
   assert.ok(!(await cloud.listAttachmentKeys()).includes(attachmentId));
+});
+
+test("migration 0012 adds attachment_revision counters and bump triggers on the attachment tables", async () => {
+  const triggers = await cloud.db.prepare(`
+    SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%bump_revision%'
+    ORDER BY name
+  `).all();
+  assert.deepEqual(triggers.results.map((row) => row.name), [
+    "attachments_bump_revision_delete",
+    "attachments_bump_revision_insert",
+    "project_readme_attachments_bump_revision_delete",
+    "project_readme_attachments_bump_revision_insert",
+  ]);
+  const projectColumns = await cloud.db.prepare("PRAGMA table_info(projects)").all();
+  assert.ok(projectColumns.results.some((column) => column.name === "attachment_revision"));
+  const taskColumns = await cloud.db.prepare("PRAGMA table_info(tasks)").all();
+  assert.ok(taskColumns.results.some((column) => column.name === "attachment_revision"));
+});
+
+test("attachment table INSERT/DELETE advances the owning resource's attachment_revision, and cascading owner deletion is a safe no-op", async () => {
+  await createProject("temp-revision-project");
+  const created = await createTask("temp-revision-project", "Revision counter task");
+  const task = created.body.task;
+
+  async function projectRevision(id) {
+    return Number(
+      await cloud.db.prepare("SELECT attachment_revision FROM projects WHERE id = ?")
+        .bind(id).first("attachment_revision"),
+    );
+  }
+  async function taskRevision(id) {
+    return Number(
+      await cloud.db.prepare("SELECT attachment_revision FROM tasks WHERE id = ?")
+        .bind(id).first("attachment_revision"),
+    );
+  }
+
+  const projectRevisionBefore = await projectRevision("temp-revision-project");
+  const readmeAttachmentId = `revtest-readme-${randomUUID()}`;
+  await cloud.db.prepare(`
+    INSERT INTO project_readme_attachments (id, project_id, filename, content_type, size, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(readmeAttachmentId, "temp-revision-project", "revtest.txt", "text/plain", 4, new Date().toISOString())
+    .run();
+  assert.equal(await projectRevision("temp-revision-project"), projectRevisionBefore + 1);
+  await cloud.db.prepare("DELETE FROM project_readme_attachments WHERE id = ?")
+    .bind(readmeAttachmentId).run();
+  assert.equal(await projectRevision("temp-revision-project"), projectRevisionBefore + 2);
+
+  const taskRevisionBefore = await taskRevision(task.id);
+  const taskAttachmentId = `revtest-attachment-${randomUUID()}`;
+  await cloud.db.prepare(`
+    INSERT INTO attachments (id, task_id, comment_id, kind, filename, content_type, size, created_at)
+    VALUES (?, ?, NULL, 'attachment', ?, ?, ?, ?)
+  `).bind(taskAttachmentId, task.id, "revtest.txt", "text/plain", 4, new Date().toISOString()).run();
+  assert.equal(await taskRevision(task.id), taskRevisionBefore + 1);
+  await cloud.db.prepare("DELETE FROM attachments WHERE id = ?").bind(taskAttachmentId).run();
+  assert.equal(await taskRevision(task.id), taskRevisionBefore + 2);
+
+  // Cascade safety: deleting the owner row itself while it still has attachment rows must not
+  // throw, even though the trigger's UPDATE targets a project/task row that no longer exists by
+  // the time the trigger body runs (AFTER DELETE fires after the owner row is already gone).
+  await createProject("temp-revision-cascade-project");
+  await cloud.db.prepare(`
+    INSERT INTO project_readme_attachments (id, project_id, filename, content_type, size, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(
+    `revtest-cascade-readme-${randomUUID()}`,
+    "temp-revision-cascade-project",
+    "cascade.txt",
+    "text/plain",
+    4,
+    new Date().toISOString(),
+  ).run();
+  await assert.doesNotReject(
+    cloud.db.prepare("DELETE FROM projects WHERE id = ?").bind("temp-revision-cascade-project").run(),
+  );
+
+  const cascadeTaskCreated = await createTask("temp-revision-project", "Cascade task");
+  const cascadeTask = cascadeTaskCreated.body.task;
+  await cloud.db.prepare(`
+    INSERT INTO attachments (id, task_id, comment_id, kind, filename, content_type, size, created_at)
+    VALUES (?, ?, NULL, 'attachment', ?, ?, ?, ?)
+  `).bind(
+    `revtest-cascade-attachment-${randomUUID()}`,
+    cascadeTask.id,
+    "cascade.txt",
+    "text/plain",
+    4,
+    new Date().toISOString(),
+  ).run();
+  await assert.doesNotReject(
+    cloud.db.prepare("DELETE FROM tasks WHERE id = ?").bind(cascadeTask.id).run(),
+  );
+});
+
+test("deleteProject() rejects a net-zero concurrent attachment change (one delete, one upload) instead of orphaning the new attachment in R2", async () => {
+  let raceCloud;
+  let attachmentAId;
+  let newAttachmentId;
+  raceCloud = await createCloudWorkerHarness({
+    serviceBindings: {
+      async RACE_TEST_HOOK() {
+        await raceCloud.request(`/api/attachments/${attachmentAId}`, {
+          method: "DELETE",
+          actorName: alice,
+        });
+        const uploaded = await raceCloud.request(
+          "/api/projects/temp-race-project/readme/attachments",
+          {
+            method: "POST",
+            actorName: alice,
+            headers: {
+              "content-type": "text/plain",
+              "x-taskboard-filename": "race-new.txt",
+              "x-taskboard-attachment-kind": "inline",
+            },
+            body: "race new attachment",
+          },
+        );
+        newAttachmentId = uploaded.body.attachment.id;
+        return new Response("ok");
+      },
+    },
+  });
+  try {
+    await raceCloud.request("/api/projects", {
+      method: "POST",
+      actorName: alice,
+      json: { id: "temp-race-project", name: "RACE", workspacePath: "/x/temp-race-project" },
+    });
+    const uploadedA = await raceCloud.request("/api/projects/temp-race-project/readme/attachments", {
+      method: "POST",
+      actorName: alice,
+      headers: {
+        "content-type": "text/plain",
+        "x-taskboard-filename": "race-a.txt",
+        "x-taskboard-attachment-kind": "inline",
+      },
+      body: "race attachment a",
+    });
+    attachmentAId = uploadedA.body.attachment.id;
+
+    const deleted = await raceCloud.request("/api/projects/temp-race-project", {
+      method: "DELETE",
+      actorName: alice,
+    });
+    assert.equal(deleted.response.status, 409);
+    assert.equal(deleted.body.error.code, "PROJECT_ATTACHMENTS_CHANGED");
+    assert.ok(newAttachmentId, "race hook should have uploaded a new attachment");
+    assert.notEqual(
+      await raceCloud.db.prepare("SELECT 1 FROM project_readme_attachments WHERE id = ?")
+        .bind(newAttachmentId).first(),
+      null,
+    );
+    assert.notEqual(await raceCloud.attachments.get(newAttachmentId), null);
+    assert.notEqual(
+      await raceCloud.db.prepare("SELECT 1 FROM projects WHERE id = ?")
+        .bind("temp-race-project").first(),
+      null,
+    );
+  } finally {
+    await raceCloud.dispose();
+  }
+});
+
+test("deleteArchivedTask() rejects a net-zero concurrent attachment change (one delete, one upload) instead of orphaning the new attachment in R2", async () => {
+  let raceCloud;
+  let attachmentAId;
+  let newAttachmentId;
+  let taskId;
+  raceCloud = await createCloudWorkerHarness({
+    serviceBindings: {
+      async RACE_TEST_HOOK() {
+        await raceCloud.request(`/api/attachments/${attachmentAId}`, {
+          method: "DELETE",
+          actorName: alice,
+        });
+        const uploaded = await raceCloud.request(`/api/tasks/${taskId}/attachments`, {
+          method: "POST",
+          actorName: alice,
+          headers: {
+            "content-type": "text/plain",
+            "x-taskboard-filename": "race-new.txt",
+            "x-taskboard-attachment-kind": "attachment",
+          },
+          body: "race new attachment",
+        });
+        newAttachmentId = uploaded.body.attachment.id;
+        return new Response("ok");
+      },
+    },
+  });
+  try {
+    await raceCloud.request("/api/projects", {
+      method: "POST",
+      actorName: alice,
+      json: { id: "temp-race-task", name: "RACE TASK", workspacePath: "/x/race-task" },
+    });
+    const created = await raceCloud.request("/api/tasks", {
+      method: "POST",
+      actorName: alice,
+      json: {
+        projectId: "temp-race-task",
+        title: "race task",
+        description: "",
+        status: "backlog",
+        priority: "none",
+        labels: [],
+      },
+    });
+    taskId = created.body.task.id;
+    const uploadedA = await raceCloud.request(`/api/tasks/${taskId}/attachments`, {
+      method: "POST",
+      actorName: alice,
+      headers: {
+        "content-type": "text/plain",
+        "x-taskboard-filename": "race-a.txt",
+        "x-taskboard-attachment-kind": "attachment",
+      },
+      body: "race attachment a",
+    });
+    attachmentAId = uploadedA.body.attachment.id;
+
+    const archived = await raceCloud.request(`/api/tasks/${taskId}/archive`, {
+      method: "POST",
+      actorName: alice,
+      json: { version: created.body.task.version },
+    });
+    assert.equal(archived.response.status, 200);
+
+    const deleted = await raceCloud.request(`/api/tasks/${taskId}`, {
+      method: "DELETE",
+      actorName: alice,
+      json: { version: archived.body.task.version },
+    });
+    assert.equal(deleted.response.status, 409);
+    assert.equal(deleted.body.error.code, "TASK_ATTACHMENTS_CHANGED");
+    assert.ok(newAttachmentId, "race hook should have uploaded a new attachment");
+    assert.notEqual(
+      await raceCloud.db.prepare("SELECT 1 FROM attachments WHERE id = ?")
+        .bind(newAttachmentId).first(),
+      null,
+    );
+    assert.notEqual(await raceCloud.attachments.get(newAttachmentId), null);
+    assert.equal(
+      (await raceCloud.request(`/api/tasks/${taskId}`, { actorName: alice })).response.status,
+      200,
+    );
+  } finally {
+    await raceCloud.dispose();
+  }
+});
+
+test("uploadAttachment/uploadProjectReadmeAttachment/deleteAttachment/deleteComment each advance the owning resource's attachment_revision without any code changes of their own (Fix-then-Audit)", async () => {
+  await createProject("temp-audit-project");
+  const created = await createTask("temp-audit-project", "Audit task");
+  const task = created.body.task;
+
+  async function taskRevision(id) {
+    return Number(
+      await cloud.db.prepare("SELECT attachment_revision FROM tasks WHERE id = ?")
+        .bind(id).first("attachment_revision"),
+    );
+  }
+  async function projectRevision(id) {
+    return Number(
+      await cloud.db.prepare("SELECT attachment_revision FROM projects WHERE id = ?")
+        .bind(id).first("attachment_revision"),
+    );
+  }
+
+  // uploadAttachment(): POST /api/tasks/:id/attachments
+  const taskRevBeforeUpload = await taskRevision(task.id);
+  const uploaded = await cloud.request(`/api/tasks/${task.id}/attachments`, {
+    method: "POST",
+    actorName: alice,
+    headers: {
+      "content-type": "text/plain",
+      "x-taskboard-filename": "audit-task.txt",
+      "x-taskboard-attachment-kind": "attachment",
+    },
+    body: "audit attachment",
+  });
+  assert.equal(uploaded.response.status, 201);
+  assert.equal(await taskRevision(task.id), taskRevBeforeUpload + 1);
+
+  // uploadProjectReadmeAttachment(): POST /api/projects/:id/readme/attachments
+  const projectRevBeforeUpload = await projectRevision("temp-audit-project");
+  const uploadedReadme = await cloud.request(
+    "/api/projects/temp-audit-project/readme/attachments",
+    {
+      method: "POST",
+      actorName: alice,
+      headers: {
+        "content-type": "text/plain",
+        "x-taskboard-filename": "audit-readme.txt",
+        "x-taskboard-attachment-kind": "inline",
+      },
+      body: "audit readme attachment",
+    },
+  );
+  assert.equal(uploadedReadme.response.status, 201);
+  assert.equal(await projectRevision("temp-audit-project"), projectRevBeforeUpload + 1);
+  // Deleted immediately (rather than left for deleteProject() to clean up) so this test doesn't
+  // leave an orphaned R2 object behind for later tests that assert an empty shared bucket.
+  const deletedReadme = await cloud.request(
+    `/api/attachments/${uploadedReadme.body.attachment.id}`,
+    { method: "DELETE", actorName: alice },
+  );
+  assert.equal(deletedReadme.response.status, 204);
+
+  // deleteAttachment(): DELETE /api/attachments/:id
+  const taskRevBeforeDelete = await taskRevision(task.id);
+  const deletedAttachment = await cloud.request(
+    `/api/attachments/${uploaded.body.attachment.id}`,
+    { method: "DELETE", actorName: alice },
+  );
+  assert.equal(deletedAttachment.response.status, 204);
+  assert.equal(await taskRevision(task.id), taskRevBeforeDelete + 1);
+
+  // deleteComment(): DELETE /api/comments/:id, cascading through attachments.comment_id
+  const comment = await cloud.request(`/api/tasks/${task.id}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Comment with an attachment" },
+  });
+  assert.equal(comment.response.status, 201);
+  const commentUpload = await cloud.request(
+    `/api/comments/${comment.body.comment.id}/attachments`,
+    {
+      method: "POST",
+      actorName: alice,
+      headers: {
+        "content-type": "text/plain",
+        "x-taskboard-filename": "audit-comment.txt",
+        "x-taskboard-attachment-kind": "attachment",
+      },
+      body: "audit comment attachment",
+    },
+  );
+  assert.equal(commentUpload.response.status, 201);
+  const taskRevBeforeCommentDelete = await taskRevision(task.id);
+  const deletedComment = await cloud.request(`/api/comments/${comment.body.comment.id}`, {
+    method: "DELETE",
+    actorName: alice,
+    json: { version: comment.body.comment.version },
+  });
+  assert.equal(deletedComment.response.status, 204);
+  assert.equal(await taskRevision(task.id), taskRevBeforeCommentDelete + 1);
 });
 
 test("the global revision is monotonic and lets clients poll only when data changed", async () => {

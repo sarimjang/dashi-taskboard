@@ -1900,13 +1900,18 @@ test("GET /api/tasks batches task_relations without changing per-task output (CW
     listedById.get(relatedB.body.task.id).relations.related.map((t) => t.id),
     [relatedA.body.task.id],
   );
-  // A task with no task_relations rows gets null/[] for every field, not undefined or a crash.
+  // A task with no task_relations rows gets null/[] for every field, not undefined or a crash,
+  // and every *Truncated flag is false.
   assert.deepEqual(listedById.get(lonelyTask.body.task.id).relations, {
     parent: null,
     subIssues: [],
+    subIssuesTruncated: false,
     blockedBy: [],
+    blockedByTruncated: false,
     blocks: [],
+    blocksTruncated: false,
     related: [],
+    relatedTruncated: false,
   });
 
   // The batched list path (listTasks -> hydrateTask with relationsOverride) must produce
@@ -2043,4 +2048,453 @@ test("GET /api/tasks keeps task_relations correct across batch-chunk boundaries 
       `relations mismatch for task ${taskId}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// task-hydration-row-caps: relation/comment/activity/comment-attachment caps
+// ---------------------------------------------------------------------------
+//
+// Coverage note: subIssues and blockedBy exercise the two distinct JOIN shapes shared by all
+// four relation kinds (blocks uses the same shape as subIssues; the singular `parent` lookup has
+// no cap since a task has at most one parent). `related` gets its own dedicated coverage below
+// because its batch query is structurally different (UNION ALL wrapped in an extra window-
+// function subquery layer) rather than just a swapped JOIN direction.
+
+async function insertSubIssueFixtures(parentId, childPrefix, count, startValue = 1) {
+  const endValue = startValue + count - 1;
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+    SELECT 'parent', ?, ? || '-' || value, '2099-01-01T00:00:' || printf('%05d', value)
+    FROM sequence
+  `).bind(startValue, endValue, parentId, childPrefix).run();
+}
+
+async function insertBlockedByFixtures(blockedId, blockerPrefix, count, startValue = 1) {
+  const endValue = startValue + count - 1;
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+    SELECT 'blocks', ? || '-' || value, ?, '2099-01-01T00:00:' || printf('%05d', value)
+    FROM sequence
+  `).bind(startValue, endValue, blockerPrefix, blockedId).run();
+}
+
+async function insertRelatedFixtures(ownerId, otherPrefix, count, startValue = 1) {
+  // ownerId must sort lexicographically before every `${otherPrefix}-${value}` id: task_relations
+  // has CHECK (relation_type <> 'related' OR source_task_id < target_task_id).
+  const endValue = startValue + count - 1;
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO task_relations (relation_type, source_task_id, target_task_id, created_at)
+    SELECT 'related', ?, ? || '-' || value, '2099-01-01T00:00:' || printf('%05d', value)
+    FROM sequence
+  `).bind(startValue, endValue, ownerId, otherPrefix).run();
+}
+
+test("GET /api/tasks/:id caps subIssues at TASK_RELATION_MAX_RESULTS and keeps the newest rows", async () => {
+  const projectId = "relation-cap-subissues";
+  await createProject(projectId);
+  const owner = await createTask(projectId, "Parent with many sub-issues");
+  const ownerId = owner.body.task.id;
+  await insertTaskFixtures(projectId, 1001, "relcap-subissue-child");
+
+  await insertSubIssueFixtures(ownerId, "relcap-subissue-child", 1000, 1);
+  const atBoundary = await fetchTask(ownerId);
+  assert.equal(atBoundary.relations.subIssues.length, 1000);
+  assert.equal(atBoundary.relations.subIssuesTruncated, false);
+
+  await insertSubIssueFixtures(ownerId, "relcap-subissue-child", 1, 1001);
+  const overBoundary = await fetchTask(ownerId);
+  assert.equal(overBoundary.relations.subIssues.length, 1000);
+  assert.equal(overBoundary.relations.subIssuesTruncated, true);
+  assert.ok(
+    overBoundary.relations.subIssues.some((t) => t.id === "relcap-subissue-child-1001"),
+    "the newest sub-issue must survive truncation",
+  );
+});
+
+test("GET /api/tasks/:id caps related at TASK_RELATION_MAX_RESULTS via the UNION ALL batch-shaped query and keeps the newest rows", async () => {
+  const projectId = "relation-cap-related";
+  await createProject(projectId);
+  await insertTaskFixtures(projectId, 1, "relcap-related-a-owner");
+  await insertTaskFixtures(projectId, 1001, "relcap-related-b-other");
+  const ownerId = "relcap-related-a-owner-1";
+
+  await insertRelatedFixtures(ownerId, "relcap-related-b-other", 1000, 1);
+  const atBoundary = await fetchTask(ownerId);
+  assert.equal(atBoundary.relations.related.length, 1000);
+  assert.equal(atBoundary.relations.relatedTruncated, false);
+
+  await insertRelatedFixtures(ownerId, "relcap-related-b-other", 1, 1001);
+  const overBoundary = await fetchTask(ownerId);
+  assert.equal(overBoundary.relations.related.length, 1000);
+  assert.equal(overBoundary.relations.relatedTruncated, true);
+  assert.ok(
+    overBoundary.relations.related.some((t) => t.id === "relcap-related-b-other-1001"),
+    "the newest related task must survive truncation",
+  );
+});
+
+test("GET /api/tasks?projectId=... isolates blockedBy truncation to the one overloaded task (CWE-400)", async () => {
+  const projectId = "relation-cap-blockedby-batch";
+  await createProject(projectId);
+  const overloaded = await createTask(projectId, "Blocked by many");
+  const overloadedId = overloaded.body.task.id;
+  const normal = await createTask(projectId, "Blocked by a few");
+  const normalId = normal.body.task.id;
+  const lonely = await createTask(projectId, "Blocked by none");
+
+  // The blocker tasks must live in the same project (task_relations_require_same_project), but
+  // must not count toward this project's own GET /api/tasks?projectId=... row cap (unrelated to
+  // this change) — archiving them keeps them valid relation targets while excluding them from
+  // the default archived=false listing below.
+  await insertTaskFixtures(projectId, 1001, "relcap-blockedby-blocker");
+  await insertBlockedByFixtures(overloadedId, "relcap-blockedby-blocker", 1001, 1);
+  await insertTaskFixtures(projectId, 3, "relcap-blockedby-normal-blocker");
+  await insertBlockedByFixtures(normalId, "relcap-blockedby-normal-blocker", 3, 1);
+  await cloud.db.prepare(`
+    UPDATE tasks SET archived_at = ?
+    WHERE project_id = ?
+      AND (id LIKE 'relcap-blockedby-blocker-%' OR id LIKE 'relcap-blockedby-normal-blocker-%')
+  `).bind(new Date().toISOString(), projectId).run();
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.tasks);
+
+  assert.equal(listedById.get(overloadedId).relations.blockedBy.length, 1000);
+  assert.equal(listedById.get(overloadedId).relations.blockedByTruncated, true);
+
+  assert.equal(listedById.get(normalId).relations.blockedBy.length, 3);
+  assert.equal(listedById.get(normalId).relations.blockedByTruncated, false);
+
+  assert.equal(listedById.get(lonely.body.task.id).relations.blockedBy.length, 0);
+  assert.equal(listedById.get(lonely.body.task.id).relations.blockedByTruncated, false);
+});
+
+async function insertCommentCapFixtures(taskId, count, prefix, startValue = 1) {
+  const endValue = startValue + count - 1;
+  const createdAt = new Date().toISOString();
+  // updated_at (unlike insertCommentFixtures above) is distinct and increasing per row, future-
+  // dated so it always dominates task.updatedAt in attachTaskActivity's activityUpdatedAt max —
+  // needed to observe activityUpdatedAt actually advancing once the cap is crossed.
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO comments (
+      id, task_id, body, thread_id, author_type, author_id, author_name, author_avatar_url,
+      version, created_at, updated_at, change_revision
+    )
+    SELECT
+      ? || '-' || value,
+      ?,
+      'Comment cap fixture ' || value,
+      NULL,
+      'user',
+      'comment-cap-fixture',
+      'Comment cap fixture',
+      NULL,
+      1,
+      ?,
+      '2099-01-01T00:00:' || printf('%05d', value),
+      value
+    FROM sequence
+  `).bind(startValue, endValue, prefix, taskId, createdAt).run();
+}
+
+test("GET /api/tasks/:id caps its own comments at COMMENT_LIST_MAX_RESULTS and keeps activityUpdatedAt advancing", async () => {
+  const projectId = "comment-cap-single";
+  await createProject(projectId);
+  const task = await createTask(projectId, "Comment cap single-task fixture");
+  const taskId = task.body.task.id;
+
+  await insertCommentCapFixtures(taskId, 1000, "commentcap-single", 1);
+  const atBoundary = await fetchTask(taskId);
+  assert.equal(atBoundary.commentsTruncated, false);
+  const activityUpdatedAtAtBoundary = atBoundary.activityUpdatedAt;
+
+  await insertCommentCapFixtures(taskId, 1, "commentcap-single", 1001);
+  const overBoundary = await fetchTask(taskId);
+  assert.equal(overBoundary.commentsTruncated, true);
+  assert.ok(
+    overBoundary.activityUpdatedAt > activityUpdatedAtAtBoundary,
+    "activityUpdatedAt must keep advancing instead of freezing once the task crosses the cap",
+  );
+});
+
+test("GET /api/tasks?projectId=... isolates commentsTruncated to the one overloaded task (CWE-400)", async () => {
+  const projectId = "comment-cap-batch";
+  await createProject(projectId);
+  const overloaded = await createTask(projectId, "Many comments");
+  const normal = await createTask(projectId, "A few comments");
+
+  await insertCommentCapFixtures(overloaded.body.task.id, 1001, "commentcap-batch-over", 1);
+  await insertCommentCapFixtures(normal.body.task.id, 3, "commentcap-batch-normal", 1);
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.tasks);
+  assert.equal(listedById.get(overloaded.body.task.id).commentsTruncated, true);
+  assert.equal(listedById.get(normal.body.task.id).commentsTruncated, false);
+});
+
+async function insertActivityCapFixtures(taskId, count, prefix, startValue = 1) {
+  const endValue = startValue + count - 1;
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO task_activities (
+      id, task_id, actor_type, actor_id, actor_name, actor_avatar_url, changes, created_at
+    )
+    SELECT
+      ? || '-' || value,
+      ?,
+      'user',
+      'activity-cap-fixture',
+      'Activity cap fixture',
+      NULL,
+      '{}',
+      '2099-01-01T00:00:' || printf('%05d', value)
+    FROM sequence
+  `).bind(startValue, endValue, prefix, taskId).run();
+}
+
+test("GET /api/tasks/:id caps its own activities at TASK_ACTIVITY_MAX_RESULTS and keeps activityUpdatedAt advancing", async () => {
+  const projectId = "activity-cap-single";
+  await createProject(projectId);
+  const task = await createTask(projectId, "Activity cap single-task fixture");
+  const taskId = task.body.task.id;
+
+  await insertActivityCapFixtures(taskId, 1000, "activitycap-single", 1);
+  const atBoundary = await fetchTask(taskId);
+  assert.equal(atBoundary.activitiesTruncated, false);
+  const activityUpdatedAtAtBoundary = atBoundary.activityUpdatedAt;
+
+  await insertActivityCapFixtures(taskId, 1, "activitycap-single", 1001);
+  const overBoundary = await fetchTask(taskId);
+  assert.equal(overBoundary.activitiesTruncated, true);
+  assert.ok(
+    overBoundary.activityUpdatedAt > activityUpdatedAtAtBoundary,
+    "activityUpdatedAt must keep advancing instead of freezing once the task crosses the cap",
+  );
+});
+
+test("GET /api/tasks?projectId=... isolates activitiesTruncated to the one overloaded task (CWE-400)", async () => {
+  const projectId = "activity-cap-batch";
+  await createProject(projectId);
+  const overloaded = await createTask(projectId, "Many activities");
+  const normal = await createTask(projectId, "A few activities");
+
+  await insertActivityCapFixtures(overloaded.body.task.id, 1001, "activitycap-batch-over", 1);
+  await insertActivityCapFixtures(normal.body.task.id, 3, "activitycap-batch-normal", 1);
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.tasks);
+  assert.equal(listedById.get(overloaded.body.task.id).activitiesTruncated, true);
+  assert.equal(listedById.get(normal.body.task.id).activitiesTruncated, false);
+});
+
+async function insertCommentAttachmentCapFixtures(taskId, commentId, count, prefix, startValue = 1) {
+  const endValue = startValue + count - 1;
+  const timestamp = new Date().toISOString();
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT CAST(? AS INTEGER)
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO attachments (
+      id, task_id, comment_id, kind, filename, content_type, size, created_at, change_revision
+    )
+    SELECT
+      ? || '-' || value,
+      ?,
+      ?,
+      'attachment',
+      'file-' || value || '.txt',
+      'text/plain',
+      4,
+      ?,
+      value
+    FROM sequence
+  `).bind(startValue, endValue, prefix, taskId, commentId, timestamp).run();
+}
+
+test("comment attachments are capped at COMMENT_ATTACHMENT_MAX_RESULTS on every hydrate/read entry point", async () => {
+  const projectId = "comment-attachment-cap";
+  await createProject(projectId);
+  const task = await createTask(projectId, "Comment attachment cap fixture");
+  const taskId = task.body.task.id;
+
+  // POST /api/tasks/:id/comments (createComment): a freshly created comment can never have
+  // pre-existing attachments (they're uploaded afterward, against the comment's real id), so
+  // this only proves the field is wired through correctly, not the truncation branch itself —
+  // that's covered by the read paths below.
+  const created = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Freshly created" },
+  });
+  assert.equal(created.response.status, 201);
+  assert.deepEqual(created.body.comment.attachments, []);
+  assert.equal(created.body.comment.attachmentsTruncated, false);
+
+  const boundaryComment = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Exactly at the cap" },
+  });
+  await insertCommentAttachmentCapFixtures(
+    taskId, boundaryComment.body.comment.id, 1000, "commentattachcap-boundary", 1,
+  );
+
+  const overflowComment = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "One past the cap" },
+  });
+  await insertCommentAttachmentCapFixtures(
+    taskId, overflowComment.body.comment.id, 1001, "commentattachcap-overflow", 1,
+  );
+
+  // GET /api/tasks/:id/comments (listComments): covers both boundary and overflow.
+  const listed = await cloud.request(`/api/tasks/${taskId}/comments`, { actorName: alice });
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.comments);
+  assert.equal(listedById.get(boundaryComment.body.comment.id).attachments.length, 1000);
+  assert.equal(listedById.get(boundaryComment.body.comment.id).attachmentsTruncated, false);
+  assert.equal(listedById.get(overflowComment.body.comment.id).attachments.length, 1000);
+  assert.equal(listedById.get(overflowComment.body.comment.id).attachmentsTruncated, true);
+
+  // GET /api/tasks/:id/comments?after=0 (listCommentsAfter): same batching path, different cursor.
+  const listedAfter = await cloud.request(
+    `/api/tasks/${taskId}/comments?after=0`,
+    { actorName: alice },
+  );
+  assert.equal(listedAfter.response.status, 200);
+  const listedAfterById = byId(listedAfter.body.comments);
+  assert.equal(listedAfterById.get(overflowComment.body.comment.id).attachments.length, 1000);
+  assert.equal(listedAfterById.get(overflowComment.body.comment.id).attachmentsTruncated, true);
+
+  // PATCH /api/comments/:id (updateComment): single-comment hydrate path.
+  const patched = await cloud.request(`/api/comments/${overflowComment.body.comment.id}`, {
+    method: "PATCH",
+    actorName: alice,
+    json: { version: overflowComment.body.comment.version, body: "Edited" },
+  });
+  assert.equal(patched.response.status, 200);
+  assert.equal(patched.body.comment.attachments.length, 1000);
+  assert.equal(patched.body.comment.attachmentsTruncated, true);
+});
+
+test("DELETE /api/comments/:id deletes every attachment (D1 row and R2 object) past the cap, and tolerates an individual R2 delete failure", async () => {
+  const projectId = "delete-comment-cap";
+  await createProject(projectId);
+  const task = await createTask(projectId, "Delete comment cap fixture");
+  const taskId = task.body.task.id;
+  const created = await cloud.request(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    actorName: alice,
+    json: { body: "Has many attachments" },
+  });
+  const commentId = created.body.comment.id;
+
+  const normalCount = 1001; // exceeds COMMENT_ATTACHMENT_MAX_RESULTS by one
+  const normalKeys = [];
+  for (let value = 1; value <= normalCount; value += 1) {
+    const key = `delete-comment-cap-${value}`;
+    normalKeys.push(key);
+    await cloud.attachments.put(key, `content ${value}`);
+  }
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO attachments (
+      id, task_id, comment_id, kind, filename, content_type, size, created_at, change_revision
+    )
+    SELECT
+      'delete-comment-cap-' || value,
+      ?,
+      ?,
+      'attachment',
+      'file-' || value || '.txt',
+      'text/plain',
+      4,
+      ?,
+      value
+    FROM sequence
+  `).bind(normalCount, taskId, commentId, new Date().toISOString()).run();
+
+  // One more attachment row whose id is too long for R2's key-length limit, so its individual
+  // R2 delete call genuinely fails at the storage layer — proving deleteComment() tolerates a
+  // real per-object failure instead of letting Promise.all reject the whole request.
+  const overlongId = "z".repeat(1200);
+  await cloud.db.prepare(`
+    INSERT INTO attachments (
+      id, task_id, comment_id, kind, filename, content_type, size, created_at, change_revision
+    ) VALUES (?, ?, ?, 'attachment', 'overlong.txt', 'text/plain', 4, ?, ?)
+  `).bind(overlongId, taskId, commentId, new Date().toISOString(), normalCount + 1).run();
+
+  async function taskAttachmentRevision() {
+    return Number(
+      await cloud.db.prepare("SELECT attachment_revision FROM tasks WHERE id = ?")
+        .bind(taskId).first("attachment_revision"),
+    );
+  }
+  const revisionBeforeDelete = await taskAttachmentRevision();
+
+  const deleted = await cloud.request(`/api/comments/${commentId}`, {
+    method: "DELETE",
+    actorName: alice,
+    json: { version: created.body.comment.version },
+  });
+  assert.equal(deleted.response.status, 204);
+
+  const remainingD1Rows = Number(await cloud.db.prepare(
+    "SELECT COUNT(*) AS count FROM attachments WHERE comment_id = ?",
+  ).bind(commentId).first("count"));
+  assert.equal(remainingD1Rows, 0);
+
+  const remainingKeys = new Set(await cloud.listAttachmentKeys());
+  for (const key of normalKeys) {
+    assert.ok(!remainingKeys.has(key), `R2 object ${key} should have been deleted`);
+  }
+
+  // Migration 0012's AFTER DELETE trigger on `attachments` fires once per row cascade-deleted
+  // (normalCount + the overlong-id row), regardless of the R2-side failure on one of them —
+  // proving deleteComment()'s D1 deletion path (untouched by this change) still drives ibz's
+  // attachment_revision counter correctly at a scale past the new cap.
+  assert.equal(await taskAttachmentRevision(), revisionBeforeDelete + normalCount + 1);
 });

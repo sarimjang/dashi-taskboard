@@ -2056,9 +2056,12 @@ test("GET /api/tasks keeps task_relations correct across batch-chunk boundaries 
 //
 // Coverage note: subIssues and blockedBy exercise the two distinct JOIN shapes shared by all
 // four relation kinds (blocks uses the same shape as subIssues; the singular `parent` lookup has
-// no cap since a task has at most one parent). `related` gets its own dedicated coverage below
-// because its batch query is structurally different (UNION ALL wrapped in an extra window-
-// function subquery layer) rather than just a swapped JOIN direction.
+// no cap since a task has at most one parent). `related`'s batch query is structurally different
+// (UNION ALL wrapped in an extra window-function subquery layer) rather than just a swapped JOIN
+// direction, so — unlike the other three kinds — it needs two separate tests: the single-row-path
+// test right after this note (CASE-WHEN JOIN, via GET /api/tasks/:id) and a dedicated batch-path
+// test below (the UNION ALL query, via GET /api/tasks?projectId=..., alongside the blockedBy
+// batch-isolation test).
 
 async function insertSubIssueFixtures(parentId, childPrefix, count, startValue = 1) {
   const endValue = startValue + count - 1;
@@ -2126,7 +2129,7 @@ test("GET /api/tasks/:id caps subIssues at TASK_RELATION_MAX_RESULTS and keeps t
   );
 });
 
-test("GET /api/tasks/:id caps related at TASK_RELATION_MAX_RESULTS via the UNION ALL batch-shaped query and keeps the newest rows", async () => {
+test("GET /api/tasks/:id caps related at TASK_RELATION_MAX_RESULTS via the single-row CASE-WHEN query and keeps the newest rows", async () => {
   const projectId = "relation-cap-related";
   await createProject(projectId);
   await insertTaskFixtures(projectId, 1, "relcap-related-a-owner");
@@ -2186,6 +2189,57 @@ test("GET /api/tasks?projectId=... isolates blockedBy truncation to the one over
 
   assert.equal(listedById.get(lonely.body.task.id).relations.blockedBy.length, 0);
   assert.equal(listedById.get(lonely.body.task.id).relations.blockedByTruncated, false);
+});
+
+test("GET /api/tasks?projectId=... isolates relatedTruncated to the one overloaded task (CWE-400) via the UNION ALL batch-shaped query", async () => {
+  const projectId = "relation-cap-related-batch";
+  await createProject(projectId);
+  // Owner prefixes use the "a-" segment and their fixture targets the "b-" segment so every
+  // generated owner id sorts lexicographically before every generated target id regardless of
+  // suffix, satisfying task_relations' CHECK (relation_type <> 'related' OR source_task_id <
+  // target_task_id) for both owners independently (see insertRelatedFixtures above).
+  await insertTaskFixtures(projectId, 1, "relcap-related-batch-a-overloaded");
+  const overloadedId = "relcap-related-batch-a-overloaded-1";
+  await insertTaskFixtures(projectId, 1, "relcap-related-batch-a-normal");
+  const normalId = "relcap-related-batch-a-normal-1";
+  const lonely = await createTask(projectId, "Related to none");
+
+  // The related targets must live in the same project (task_relations_require_same_project), but
+  // must not count toward this project's own GET /api/tasks?projectId=... row cap (unrelated to
+  // this change) — archiving them keeps them valid relation targets while excluding them from
+  // the default archived=false listing below.
+  await insertTaskFixtures(projectId, 1001, "relcap-related-batch-b-other-overloaded");
+  await insertRelatedFixtures(overloadedId, "relcap-related-batch-b-other-overloaded", 1001, 1);
+  await insertTaskFixtures(projectId, 3, "relcap-related-batch-b-other-normal");
+  await insertRelatedFixtures(normalId, "relcap-related-batch-b-other-normal", 3, 1);
+  await cloud.db.prepare(`
+    UPDATE tasks SET archived_at = ?
+    WHERE project_id = ?
+      AND (id LIKE 'relcap-related-batch-b-other-overloaded-%'
+        OR id LIKE 'relcap-related-batch-b-other-normal-%')
+  `).bind(new Date().toISOString(), projectId).run();
+
+  const listed = await cloud.request(
+    `/api/tasks?projectId=${projectId}&archived=false`,
+    { actorName: alice },
+  );
+  assert.equal(listed.response.status, 200);
+  const listedById = byId(listed.body.tasks);
+
+  assert.equal(listedById.get(overloadedId).relations.related.length, 1000);
+  assert.equal(listedById.get(overloadedId).relations.relatedTruncated, true);
+  assert.ok(
+    listedById.get(overloadedId).relations.related.some(
+      (t) => t.id === "relcap-related-batch-b-other-overloaded-1001",
+    ),
+    "the newest related task must survive truncation",
+  );
+
+  assert.equal(listedById.get(normalId).relations.related.length, 3);
+  assert.equal(listedById.get(normalId).relations.relatedTruncated, false);
+
+  assert.equal(listedById.get(lonely.body.task.id).relations.related.length, 0);
+  assert.equal(listedById.get(lonely.body.task.id).relations.relatedTruncated, false);
 });
 
 async function insertCommentCapFixtures(taskId, count, prefix, startValue = 1) {

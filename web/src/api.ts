@@ -20,6 +20,7 @@ import type {
   IssueRelationType,
   JiraConnection,
   Project,
+  ProjectListResponse,
   ProjectReadme,
   ProjectReadmeAttachment,
   ProjectSummary,
@@ -138,9 +139,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
-  const data = await request<{ projects: Project[] }>("/api/projects", { signal });
-  return data.projects;
+export async function listProjects(signal?: AbortSignal): Promise<ProjectListResponse> {
+  return request<ProjectListResponse>("/api/projects", { signal });
 }
 
 export async function getJiraConnection(signal?: AbortSignal): Promise<JiraConnection> {

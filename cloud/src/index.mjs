@@ -32,6 +32,11 @@ const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 const TASK_TREE_MAX_NODES = 1_000;
 const TASK_LIST_MAX_RESULTS = 1_000;
 const COMMENT_LIST_MAX_RESULTS = 1_000;
+const TASK_RELATION_MAX_RESULTS = 1_000;
+// Also reserved for dashi-taskboard-1jm (listTaskActivities()) and dashi-taskboard-kgg
+// (listTaskAttachments()/listCommentAttachments()) to reuse verbatim once those land.
+const TASK_ACTIVITY_MAX_RESULTS = 1_000;
+const COMMENT_ATTACHMENT_MAX_RESULTS = 1_000;
 // Projects are created one at a time via `taskctl project create` (one per tracked
 // repo/workspace), never bulk-generated like tasks or comments. This repo's own
 // multi-project workspace (app_develop/repo-study/*) tops out around 170 sibling
@@ -1014,6 +1019,44 @@ function changed(result) {
   return result.meta.changes > 0;
 }
 
+// Truncation helper for single-owner queries (e.g. one task's relations/comments/activities).
+// `rows` must come from a query already bound to `max + 1` (via LIMIT) so D1 never actually
+// reads more than one row past the cap — see design.md "批次路徑的截斷必須發生在 SQL 層".
+function capOwnRows(rows, max) {
+  if (rows.length <= max) return { rows, truncated: false };
+  return { rows: rows.slice(0, max), truncated: true };
+}
+
+// Truncation helper for batch queries covering many owners at once. `rows` must come from a
+// query that computed `ROW_NUMBER() OVER (PARTITION BY <owner column AS owner_id> ORDER BY
+// <recency> DESC) AS rn` and filtered `rn <= max + 1`, so each owner contributes at most
+// `max + 1` rows to `rows` regardless of how many it actually has. `ownerIds` is the full set
+// of owners this batch covers, so owners with zero matching rows still get a `{ rows: [],
+// truncated: false }` entry instead of being silently absent from the returned Map.
+function capRowsByOwnerId(rows, ownerIds, max) {
+  const byOwnerId = new Map(ownerIds.map((ownerId) => [ownerId, { rows: [], truncated: false }]));
+  for (const row of rows) {
+    const entry = byOwnerId.get(row.owner_id);
+    if (!entry) continue;
+    if (row.rn <= max) {
+      entry.rows.push(row);
+    } else {
+      entry.truncated = true;
+    }
+  }
+  return byOwnerId;
+}
+
+// Re-sorts a capped relation batch's rows back into display order (tasks.sort_order,
+// tasks.created_at, tasks.id) after the cap-selection query ordered them by relation recency
+// instead — see design.md "截斷時的排序偏好".
+function compareTaskDisplayOrder(a, b) {
+  if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
 function taskActivityStatement(env, taskId, actor, changes, timestamp, version) {
   return env.DB.prepare(`
     INSERT INTO task_activities (
@@ -1069,17 +1112,51 @@ function assertTaskVersion(row, expectedVersion) {
   }
 }
 
-async function attachmentsForComment(env, commentId) {
-  return (
-    await all(
+// `capped` is required (no default) so every call site states its intent explicitly — see
+// design.md's "遺漏呼叫點意外套用錯誤預設值" risk. `capped: true` truncates to
+// COMMENT_ATTACHMENT_MAX_RESULTS (newest by change_revision) for hydrate/read paths;
+// `capped: false` reads every attachment row, required by deleteComment() so no attachment is
+// left un-cleaned in R2 once its D1 row is cascade-deleted.
+async function attachmentsForComment(env, commentId, { capped }) {
+  if (capped) {
+    const rows = await all(
       env.DB.prepare(
-        "SELECT * FROM attachments WHERE comment_id = ? ORDER BY created_at, id",
-      ).bind(commentId),
-    )
-  ).map(attachmentFromRow);
+        "SELECT * FROM attachments WHERE comment_id = ? ORDER BY change_revision DESC LIMIT ?",
+      ).bind(commentId, COMMENT_ATTACHMENT_MAX_RESULTS + 1),
+    );
+    const { rows: cappedRows, truncated } = capOwnRows(rows, COMMENT_ATTACHMENT_MAX_RESULTS);
+    return { attachments: cappedRows.map(attachmentFromRow), truncated };
+  }
+  const rows = await all(
+    env.DB.prepare(
+      "SELECT * FROM attachments WHERE comment_id = ? ORDER BY created_at, id",
+    ).bind(commentId),
+  );
+  return { attachments: rows.map(attachmentFromRow), truncated: false };
 }
 
-async function attachmentsByCommentIdForTask(env, taskId) {
+async function attachmentsByCommentIdForTask(env, taskId, { capped }) {
+  if (capped) {
+    const rows = await all(env.DB.prepare(`
+      SELECT * FROM (
+        SELECT attachments.*, comment_id AS owner_id,
+          ROW_NUMBER() OVER (PARTITION BY comment_id ORDER BY change_revision DESC) AS rn
+        FROM attachments
+        WHERE task_id = ? AND comment_id IS NOT NULL
+      )
+      WHERE rn <= ?
+    `).bind(taskId, COMMENT_ATTACHMENT_MAX_RESULTS + 1));
+    const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
+    const byOwnerId = capRowsByOwnerId(rows, ownerIds, COMMENT_ATTACHMENT_MAX_RESULTS);
+    const byCommentId = new Map();
+    for (const [commentId, entry] of byOwnerId) {
+      byCommentId.set(commentId, {
+        attachments: entry.rows.map(attachmentFromRow),
+        truncated: entry.truncated,
+      });
+    }
+    return byCommentId;
+  }
   const rows = await all(
     env.DB.prepare(
       "SELECT * FROM attachments WHERE task_id = ? AND comment_id IS NOT NULL ORDER BY created_at, id",
@@ -1088,25 +1165,32 @@ async function attachmentsByCommentIdForTask(env, taskId) {
   const byCommentId = new Map();
   for (const row of rows) {
     const attachment = attachmentFromRow(row);
-    const list = byCommentId.get(row.comment_id);
-    if (list) {
-      list.push(attachment);
+    const entry = byCommentId.get(row.comment_id);
+    if (entry) {
+      entry.attachments.push(attachment);
     } else {
-      byCommentId.set(row.comment_id, [attachment]);
+      byCommentId.set(row.comment_id, { attachments: [attachment], truncated: false });
     }
   }
   return byCommentId;
 }
 
 async function hydrateComment(env, row, attachmentsOverride) {
-  const attachments = attachmentsOverride ?? (await attachmentsForComment(env, row.id));
+  const { attachments, truncated } = attachmentsOverride
+    ?? (await attachmentsForComment(env, row.id, { capped: true }));
   const comment = commentFromRow(row, attachments);
+  comment.attachmentsTruncated = truncated;
   comment.threadBinding = redactThreadBindingForResponse(comment.threadBinding);
   return comment;
 }
 
+// subIssues/blockedBy/blocks/related each fetch TASK_RELATION_MAX_RESULTS + 1 rows ordered by
+// relation recency (newest first) so D1 never reads more than one row past the cap, then get
+// capped and re-sorted back into display order (tasks.sort_order, tasks.created_at, tasks.id) —
+// see design.md "批次路徑的截斷必須發生在 SQL 層" and "截斷時的排序偏好". `parent` has no cap:
+// a task has at most one parent by construction (relation_type = 'parent' is 1:1 per target).
 async function taskRelationsForRow(env, taskId) {
-  const [parent, subIssues, blockedBy, blocks, related] = await Promise.all([
+  const [parent, subIssuesRows, blockedByRows, blocksRows, relatedRows] = await Promise.all([
     env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1120,24 +1204,27 @@ async function taskRelationsForRow(env, taskId) {
       JOIN tasks ON tasks.id = task_relations.target_task_id
       WHERE task_relations.relation_type = 'parent'
         AND task_relations.source_task_id = ?
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(taskId)),
+      ORDER BY task_relations.created_at DESC
+      LIMIT ?
+    `).bind(taskId, TASK_RELATION_MAX_RESULTS + 1)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
       JOIN tasks ON tasks.id = task_relations.source_task_id
       WHERE task_relations.relation_type = 'blocks'
         AND task_relations.target_task_id = ?
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(taskId)),
+      ORDER BY task_relations.created_at DESC
+      LIMIT ?
+    `).bind(taskId, TASK_RELATION_MAX_RESULTS + 1)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
       JOIN tasks ON tasks.id = task_relations.target_task_id
       WHERE task_relations.relation_type = 'blocks'
         AND task_relations.source_task_id = ?
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(taskId)),
+      ORDER BY task_relations.created_at DESC
+      LIMIT ?
+    `).bind(taskId, TASK_RELATION_MAX_RESULTS + 1)),
     all(env.DB.prepare(`
       SELECT tasks.*
       FROM task_relations
@@ -1150,9 +1237,18 @@ async function taskRelationsForRow(env, taskId) {
           task_relations.source_task_id = ?
           OR task_relations.target_task_id = ?
         )
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(taskId, taskId, taskId)),
+      ORDER BY task_relations.created_at DESC
+      LIMIT ?
+    `).bind(taskId, taskId, taskId, TASK_RELATION_MAX_RESULTS + 1)),
   ]);
+  const subIssues = capOwnRows(subIssuesRows, TASK_RELATION_MAX_RESULTS);
+  const blockedBy = capOwnRows(blockedByRows, TASK_RELATION_MAX_RESULTS);
+  const blocks = capOwnRows(blocksRows, TASK_RELATION_MAX_RESULTS);
+  const related = capOwnRows(relatedRows, TASK_RELATION_MAX_RESULTS);
+  subIssues.rows.sort(compareTaskDisplayOrder);
+  blockedBy.rows.sort(compareTaskDisplayOrder);
+  blocks.rows.sort(compareTaskDisplayOrder);
+  related.rows.sort(compareTaskDisplayOrder);
   return { parent, subIssues, blockedBy, blocks, related };
 }
 
@@ -1182,66 +1278,86 @@ async function relationParentsByTaskId(env, taskIds) {
   return parentByTaskId;
 }
 
+// Each owner's rows are capped in the SQL layer via ROW_NUMBER() OVER (PARTITION BY <owner
+// column> ORDER BY task_relations.created_at DESC), filtered to rn <= TASK_RELATION_MAX_RESULTS
+// + 1 so D1 never reads more than one row past the cap per owner — see design.md "批次路徑的截
+// 斷必須發生在 SQL 層". capRowsByOwnerId() then does the final max-vs-(max+1) truncation, and
+// each owner's surviving rows are re-sorted back into display order afterward.
 async function relationSubIssuesByTaskId(env, taskIds) {
-  const subIssuesByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += 80) {
     const chunk = taskIds.slice(offset, offset + 80);
     const placeholders = chunk.map(() => "?").join(", ");
     batches.push(all(env.DB.prepare(`
-      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
-      FROM task_relations
-      JOIN tasks ON tasks.id = task_relations.target_task_id
-      WHERE task_relations.relation_type = 'parent'
-        AND task_relations.source_task_id IN (${placeholders})
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(...chunk)));
+      SELECT * FROM (
+        SELECT tasks.*, task_relations.source_task_id AS owner_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY task_relations.source_task_id
+            ORDER BY task_relations.created_at DESC
+          ) AS rn
+        FROM task_relations
+        JOIN tasks ON tasks.id = task_relations.target_task_id
+        WHERE task_relations.relation_type = 'parent'
+          AND task_relations.source_task_id IN (${placeholders})
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, TASK_RELATION_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) subIssuesByTaskId.get(row.relation_owner_id)?.push(row);
-  }
+  const rows = (await Promise.all(batches)).flat();
+  const subIssuesByTaskId = capRowsByOwnerId(rows, taskIds, TASK_RELATION_MAX_RESULTS);
+  for (const entry of subIssuesByTaskId.values()) entry.rows.sort(compareTaskDisplayOrder);
   return subIssuesByTaskId;
 }
 
 async function relationBlockedByByTaskId(env, taskIds) {
-  const blockedByByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += 80) {
     const chunk = taskIds.slice(offset, offset + 80);
     const placeholders = chunk.map(() => "?").join(", ");
     batches.push(all(env.DB.prepare(`
-      SELECT tasks.*, task_relations.target_task_id AS relation_owner_id
-      FROM task_relations
-      JOIN tasks ON tasks.id = task_relations.source_task_id
-      WHERE task_relations.relation_type = 'blocks'
-        AND task_relations.target_task_id IN (${placeholders})
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(...chunk)));
+      SELECT * FROM (
+        SELECT tasks.*, task_relations.target_task_id AS owner_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY task_relations.target_task_id
+            ORDER BY task_relations.created_at DESC
+          ) AS rn
+        FROM task_relations
+        JOIN tasks ON tasks.id = task_relations.source_task_id
+        WHERE task_relations.relation_type = 'blocks'
+          AND task_relations.target_task_id IN (${placeholders})
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, TASK_RELATION_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) blockedByByTaskId.get(row.relation_owner_id)?.push(row);
-  }
+  const rows = (await Promise.all(batches)).flat();
+  const blockedByByTaskId = capRowsByOwnerId(rows, taskIds, TASK_RELATION_MAX_RESULTS);
+  for (const entry of blockedByByTaskId.values()) entry.rows.sort(compareTaskDisplayOrder);
   return blockedByByTaskId;
 }
 
 async function relationBlocksByTaskId(env, taskIds) {
-  const blocksByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += 80) {
     const chunk = taskIds.slice(offset, offset + 80);
     const placeholders = chunk.map(() => "?").join(", ");
     batches.push(all(env.DB.prepare(`
-      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
-      FROM task_relations
-      JOIN tasks ON tasks.id = task_relations.target_task_id
-      WHERE task_relations.relation_type = 'blocks'
-        AND task_relations.source_task_id IN (${placeholders})
-      ORDER BY tasks.sort_order, tasks.created_at, tasks.id
-    `).bind(...chunk)));
+      SELECT * FROM (
+        SELECT tasks.*, task_relations.source_task_id AS owner_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY task_relations.source_task_id
+            ORDER BY task_relations.created_at DESC
+          ) AS rn
+        FROM task_relations
+        JOIN tasks ON tasks.id = task_relations.target_task_id
+        WHERE task_relations.relation_type = 'blocks'
+          AND task_relations.source_task_id IN (${placeholders})
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, TASK_RELATION_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) blocksByTaskId.get(row.relation_owner_id)?.push(row);
-  }
+  const rows = (await Promise.all(batches)).flat();
+  const blocksByTaskId = capRowsByOwnerId(rows, taskIds, TASK_RELATION_MAX_RESULTS);
+  for (const entry of blocksByTaskId.values()) entry.rows.sort(compareTaskDisplayOrder);
   return blocksByTaskId;
 }
 
@@ -1254,29 +1370,40 @@ async function relationBlocksByTaskId(env, taskIds) {
 const RELATED_BATCH_CHUNK_SIZE = 40;
 
 async function relationRelatedByTaskId(env, taskIds) {
-  const relatedByTaskId = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += RELATED_BATCH_CHUNK_SIZE) {
     const chunk = taskIds.slice(offset, offset + RELATED_BATCH_CHUNK_SIZE);
     const placeholders = chunk.map(() => "?").join(", ");
+    // The window function needs a subquery layered on top of the UNION ALL (a window function
+    // can't itself span the two UNION ALL branches), and `relation_created_at` is aliased apart
+    // from `tasks.*`'s own `created_at` to avoid the two colliding.
     batches.push(all(env.DB.prepare(`
-      SELECT tasks.*, task_relations.source_task_id AS relation_owner_id
-      FROM task_relations
-      JOIN tasks ON tasks.id = task_relations.target_task_id
-      WHERE task_relations.relation_type = 'related'
-        AND task_relations.source_task_id IN (${placeholders})
-      UNION ALL
-      SELECT tasks.*, task_relations.target_task_id AS relation_owner_id
-      FROM task_relations
-      JOIN tasks ON tasks.id = task_relations.source_task_id
-      WHERE task_relations.relation_type = 'related'
-        AND task_relations.target_task_id IN (${placeholders})
-      ORDER BY sort_order, created_at, id
-    `).bind(...chunk, ...chunk)));
+      SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY owner_id ORDER BY relation_created_at DESC
+        ) AS rn
+        FROM (
+          SELECT tasks.*, task_relations.source_task_id AS owner_id,
+            task_relations.created_at AS relation_created_at
+          FROM task_relations
+          JOIN tasks ON tasks.id = task_relations.target_task_id
+          WHERE task_relations.relation_type = 'related'
+            AND task_relations.source_task_id IN (${placeholders})
+          UNION ALL
+          SELECT tasks.*, task_relations.target_task_id AS owner_id,
+            task_relations.created_at AS relation_created_at
+          FROM task_relations
+          JOIN tasks ON tasks.id = task_relations.source_task_id
+          WHERE task_relations.relation_type = 'related'
+            AND task_relations.target_task_id IN (${placeholders})
+        )
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, ...chunk, TASK_RELATION_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) relatedByTaskId.get(row.relation_owner_id)?.push(row);
-  }
+  const rows = (await Promise.all(batches)).flat();
+  const relatedByTaskId = capRowsByOwnerId(rows, taskIds, TASK_RELATION_MAX_RESULTS);
+  for (const entry of relatedByTaskId.values()) entry.rows.sort(compareTaskDisplayOrder);
   return relatedByTaskId;
 }
 
@@ -1289,12 +1416,13 @@ async function taskRelationsByTaskId(env, taskIds) {
       relationBlocksByTaskId(env, taskIds),
       relationRelatedByTaskId(env, taskIds),
     ]);
+  const emptyRelations = { rows: [], truncated: false };
   return new Map(taskIds.map((taskId) => [taskId, {
     parent: parentByTaskId.get(taskId) ?? null,
-    subIssues: subIssuesByTaskId.get(taskId) ?? [],
-    blockedBy: blockedByByTaskId.get(taskId) ?? [],
-    blocks: blocksByTaskId.get(taskId) ?? [],
-    related: relatedByTaskId.get(taskId) ?? [],
+    subIssues: subIssuesByTaskId.get(taskId) ?? emptyRelations,
+    blockedBy: blockedByByTaskId.get(taskId) ?? emptyRelations,
+    blocks: blocksByTaskId.get(taskId) ?? emptyRelations,
+    related: relatedByTaskId.get(taskId) ?? emptyRelations,
   }]));
 }
 
@@ -1316,34 +1444,54 @@ async function hydrateTask(env, row, activityComments = null, activityChanges = 
   ]);
   task.relations = {
     parent: relations.parent ? taskRelationSummaryFromRow(relations.parent) : null,
-    subIssues: relations.subIssues.map(taskRelationSummaryFromRow),
-    blockedBy: relations.blockedBy.map(taskRelationSummaryFromRow),
-    blocks: relations.blocks.map(taskRelationSummaryFromRow),
-    related: relations.related.map(taskRelationSummaryFromRow),
+    subIssues: relations.subIssues.rows.map(taskRelationSummaryFromRow),
+    subIssuesTruncated: relations.subIssues.truncated,
+    blockedBy: relations.blockedBy.rows.map(taskRelationSummaryFromRow),
+    blockedByTruncated: relations.blockedBy.truncated,
+    blocks: relations.blocks.rows.map(taskRelationSummaryFromRow),
+    blocksTruncated: relations.blocks.truncated,
+    related: relations.related.rows.map(taskRelationSummaryFromRow),
+    relatedTruncated: relations.related.truncated,
   };
-  const comments = activityComments ?? await all(env.DB.prepare(`
-    SELECT
-      id, task_id,
-      CASE WHEN thread_id IS NULL THEN NULL ELSE substr(body, 1, 512) END AS body,
-      thread_id, thread_codex_project_id, thread_codex_project_kind,
-      thread_codex_host_id, thread_workspace_path,
-      author_type, author_id, author_name,
-      author_avatar_url, version, updated_at
-    FROM comments
-    WHERE task_id = ?
-    ORDER BY id
-  `).bind(task.id));
-  const activities = activityChanges ?? await all(env.DB.prepare(`
-    SELECT
-      id, task_id, actor_type, actor_id, actor_name, actor_avatar_url, created_at
-    FROM task_activities
-    WHERE task_id = ?
-    ORDER BY created_at, id
-  `).bind(task.id));
+  // ORDER BY change_revision/created_at DESC (newest first) rather than the old ORDER BY
+  // id/created_at, id — so a truncated set keeps the newest rows and activityKey/
+  // activityUpdatedAt (computed below by attachTaskActivity) keep advancing as new
+  // comments/activities arrive, instead of freezing once a task crosses the cap — see
+  // design.md "截斷時的排序偏好". attachTaskActivity re-sorts by id before use, so this only
+  // affects which rows survive the cap, not display order.
+  const commentsResult = activityComments ?? capOwnRows(
+    await all(env.DB.prepare(`
+      SELECT
+        id, task_id,
+        CASE WHEN thread_id IS NULL THEN NULL ELSE substr(body, 1, 512) END AS body,
+        thread_id, thread_codex_project_id, thread_codex_project_kind,
+        thread_codex_host_id, thread_workspace_path,
+        author_type, author_id, author_name,
+        author_avatar_url, version, updated_at
+      FROM comments
+      WHERE task_id = ?
+      ORDER BY change_revision DESC
+      LIMIT ?
+    `).bind(task.id, COMMENT_LIST_MAX_RESULTS + 1)),
+    COMMENT_LIST_MAX_RESULTS,
+  );
+  const activitiesResult = activityChanges ?? capOwnRows(
+    await all(env.DB.prepare(`
+      SELECT
+        id, task_id, actor_type, actor_id, actor_name, actor_avatar_url, created_at
+      FROM task_activities
+      WHERE task_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).bind(task.id, TASK_ACTIVITY_MAX_RESULTS + 1)),
+    TASK_ACTIVITY_MAX_RESULTS,
+  );
+  task.commentsTruncated = commentsResult.truncated;
+  task.activitiesTruncated = activitiesResult.truncated;
   return attachTaskActivity(
     task,
-    comments,
-    activities,
+    commentsResult.rows,
+    activitiesResult.rows,
     previewImageRow ? attachmentFromRow(previewImageRow) : null,
   );
 }
@@ -1420,50 +1568,55 @@ async function getTaskTree(env, id, direction, depth) {
 }
 
 async function taskActivityComments(env, taskIds) {
-  const commentsByTask = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += 80) {
     const chunk = taskIds.slice(offset, offset + 80);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
     batches.push(all(env.DB.prepare(`
-      SELECT
-        id, task_id,
-        CASE WHEN thread_id IS NULL THEN NULL ELSE substr(body, 1, 512) END AS body,
-        thread_id, thread_codex_project_id, thread_codex_project_kind,
-        thread_codex_host_id, thread_workspace_path,
-        author_type, author_id, author_name,
-        author_avatar_url, version, updated_at
-      FROM comments
-      WHERE task_id IN (${placeholders})
-      ORDER BY task_id, id
-    `).bind(...chunk)));
+      SELECT * FROM (
+        SELECT
+          id, task_id, task_id AS owner_id,
+          CASE WHEN thread_id IS NULL THEN NULL ELSE substr(body, 1, 512) END AS body,
+          thread_id, thread_codex_project_id, thread_codex_project_kind,
+          thread_codex_host_id, thread_workspace_path,
+          author_type, author_id, author_name,
+          author_avatar_url, version, updated_at,
+          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY change_revision DESC) AS rn
+        FROM comments
+        WHERE task_id IN (${placeholders})
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, COMMENT_LIST_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) commentsByTask.get(row.task_id)?.push(row);
-  }
-  return commentsByTask;
+  const rows = (await Promise.all(batches)).flat();
+  return capRowsByOwnerId(rows, taskIds, COMMENT_LIST_MAX_RESULTS);
 }
 
 async function taskActivitiesForTasks(env, taskIds) {
-  const activitiesByTask = new Map(taskIds.map((taskId) => [taskId, []]));
   const batches = [];
   for (let offset = 0; offset < taskIds.length; offset += 80) {
     const chunk = taskIds.slice(offset, offset + 80);
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(", ");
     batches.push(all(env.DB.prepare(`
-      SELECT
-        id, task_id, actor_type, actor_id, actor_name, actor_avatar_url, created_at
-      FROM task_activities
-      WHERE task_id IN (${placeholders})
-      ORDER BY task_id, created_at, id
-    `).bind(...chunk)));
+      SELECT * FROM (
+        SELECT *, task_id AS owner_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY task_id ORDER BY created_at DESC, id DESC
+          ) AS rn
+        FROM (
+          SELECT
+            id, task_id, actor_type, actor_id, actor_name, actor_avatar_url, created_at
+          FROM task_activities
+          WHERE task_id IN (${placeholders})
+        )
+      )
+      WHERE rn <= ?
+    `).bind(...chunk, TASK_ACTIVITY_MAX_RESULTS + 1)));
   }
-  for (const rows of await Promise.all(batches)) {
-    for (const row of rows) activitiesByTask.get(row.task_id)?.push(row);
-  }
-  return activitiesByTask;
+  const rows = (await Promise.all(batches)).flat();
+  return capRowsByOwnerId(rows, taskIds, TASK_ACTIVITY_MAX_RESULTS);
 }
 
 function parseProjectCreate(body) {
@@ -1952,11 +2105,12 @@ async function listTasks(env, filters) {
     taskActivitiesForTasks(env, taskIds),
     taskRelationsByTaskId(env, taskIds),
   ]);
+  const emptyHydrationResult = { rows: [], truncated: false };
   return Promise.all(rows.map((row) => hydrateTask(
     env,
     row,
-    commentsByTask.get(row.id) ?? [],
-    activitiesByTask.get(row.id) ?? [],
+    commentsByTask.get(row.id) ?? emptyHydrationResult,
+    activitiesByTask.get(row.id) ?? emptyHydrationResult,
     relationsByTaskId.get(row.id),
   )));
 }
@@ -2983,10 +3137,11 @@ async function listComments(env, taskId) {
       `Comment list cannot exceed ${COMMENT_LIST_MAX_RESULTS} results; use the ?after= cursor to page incrementally`,
     );
   }
-  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
+  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id, { capped: true });
+  const emptyAttachments = { attachments: [], truncated: false };
   return {
     comments: await Promise.all(
-      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? [])),
+      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? emptyAttachments)),
     ),
     nextCursor: nextCursor(rows, null),
   };
@@ -3007,10 +3162,11 @@ async function listCommentsAfter(env, taskId, after) {
       `Comment list cannot exceed ${COMMENT_LIST_MAX_RESULTS} results since the given cursor; the task has too many changes to page from this position`,
     );
   }
-  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id);
+  const attachmentsByCommentId = await attachmentsByCommentIdForTask(env, task.id, { capped: true });
+  const emptyAttachments = { attachments: [], truncated: false };
   return {
     comments: await Promise.all(
-      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? [])),
+      rows.map((row) => hydrateComment(env, row, attachmentsByCommentId.get(row.id) ?? emptyAttachments)),
     ),
     nextCursor: nextCursor(rows, after),
   };
@@ -3099,10 +3255,38 @@ async function updateComment(env, id, input) {
   return hydrateComment(env, row);
 }
 
+// deleteComment()'s R2 cleanup runs after the comment's D1 row (and, via ON DELETE CASCADE, its
+// attachment rows) are already gone, so it's best-effort housekeeping: a failed individual R2
+// delete must not fail the whole DELETE /api/comments/:id request — see design.md
+// "deleteComment() 的附件清理讀取獨立於截斷機制之外". Batches run sequentially, but deletes
+// within a batch run concurrently, keeping the number of in-flight R2 calls bounded regardless
+// of how many attachments the comment had.
+const COMMENT_ATTACHMENT_DELETE_BATCH_SIZE = 20;
+
+async function deleteAttachmentObjectsBestEffort(env, attachmentIds) {
+  for (
+    let offset = 0;
+    offset < attachmentIds.length;
+    offset += COMMENT_ATTACHMENT_DELETE_BATCH_SIZE
+  ) {
+    const batch = attachmentIds.slice(offset, offset + COMMENT_ATTACHMENT_DELETE_BATCH_SIZE);
+    await Promise.all(batch.map(async (attachmentId) => {
+      try {
+        await env.ATTACHMENTS.delete(attachmentId);
+      } catch (error) {
+        console.error(error);
+      }
+    }));
+  }
+}
+
 async function deleteComment(env, id, expectedVersion) {
   const current = await requireCommentRow(env, id);
   assertCommentVersion(current, expectedVersion);
-  const attachments = await attachmentsForComment(env, current.id);
+  // capped: false — this read must stay complete regardless of COMMENT_ATTACHMENT_MAX_RESULTS,
+  // since the comment row (and its attachments, via ON DELETE CASCADE) is about to be deleted;
+  // truncating this read would orphan the R2 objects for any attachment past the cap.
+  const { attachments } = await attachmentsForComment(env, current.id, { capped: false });
   const result = await env.DB.prepare(`
     DELETE FROM comments WHERE id = ? AND version = ?
   `).bind(current.id, expectedVersion).run();
@@ -3115,7 +3299,7 @@ async function deleteComment(env, id, expectedVersion) {
       { expectedVersion, actualVersion: latest.version },
     );
   }
-  await Promise.all(attachments.map((attachment) => env.ATTACHMENTS.delete(attachment.id)));
+  await deleteAttachmentObjectsBestEffort(env, attachments.map((attachment) => attachment.id));
 }
 
 async function listTaskAttachments(env, taskId, after) {

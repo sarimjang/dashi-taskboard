@@ -39,6 +39,16 @@ const COMMENT_LIST_MAX_RESULTS = 1_000;
 // while remaining far tighter than TASK_LIST_MAX_RESULTS, since GET /api/projects
 // has no query params (requireNoQuery) to narrow an oversized result.
 const PROJECT_LIST_MAX_RESULTS = 500;
+// Neither project_readme_attachments nor attachments has an upload-time count cap today
+// (only per-file size limits exist: ATTACHMENT_BODY_LIMIT, PROJECT_README_BODY_LIMIT), so a
+// single project/task's attachment count is unbounded in principle. This constant bounds each
+// individual page fetch in the pre-delete pagination loops below (fixes the CWE-400 finding:
+// an unbounded SELECT inside env.DB.batch()) without bounding the *total* number of ids
+// collected — the loop keeps paging until exhausted, so completeness (no orphaned R2 objects
+// after the cascading DELETE) is never traded away for the per-page cap. 200 keeps each row
+// payload (a single id string) trivially small while staying well above any attachment count
+// seen in practice, and keeps multi-page regression-test fixtures reasonably fast to set up.
+const ATTACHMENT_DELETE_PAGE_SIZE = 200;
 
 export class RealtimeHub extends DurableObject {
   async fetch(request) {
@@ -1828,6 +1838,23 @@ async function deleteProjectLabel(env, projectId, label) {
   return getProject(env, projectId);
 }
 
+async function collectProjectReadmeAttachmentIds(env, projectId) {
+  const ids = [];
+  let cursor = "";
+  for (;;) {
+    const page = await all(env.DB.prepare(`
+      SELECT id FROM project_readme_attachments
+      WHERE project_id = ? AND id > ?
+      ORDER BY id
+      LIMIT ?
+    `).bind(projectId, cursor, ATTACHMENT_DELETE_PAGE_SIZE));
+    if (page.length === 0) return ids;
+    for (const row of page) ids.push(row.id);
+    cursor = page[page.length - 1].id;
+    if (page.length < ATTACHMENT_DELETE_PAGE_SIZE) return ids;
+  }
+}
+
 async function deleteProject(env, id) {
   const project = await getProject(env, id);
   if (!project) {
@@ -1836,21 +1863,43 @@ async function deleteProject(env, id) {
   if (!id.startsWith("temp-")) {
     throw new ApiError(403, "PROJECT_DELETE_FORBIDDEN", "Only manually created projects can be deleted");
   }
-  const results = await env.DB.batch([
-    env.DB.prepare("SELECT id FROM project_readme_attachments WHERE project_id = ?").bind(id),
-    env.DB.prepare(`
-      DELETE FROM projects
-      WHERE id = ?
-        AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
-    `).bind(id, id),
-  ]);
-  if (!changed(results[1])) {
+  // Read before pagination begins so the DELETE's guard subquery below can detect *any*
+  // attachment-set change (insert, delete, or a net-zero mix of both) between id collection and
+  // delete time, not just a count mismatch — see design.md's attachment_revision guard decision.
+  // getProject() above returns a public-field subset, so this needs its own small query rather
+  // than reusing that call's row.
+  const revisionAtStart = await env.DB.prepare(
+    "SELECT attachment_revision FROM projects WHERE id = ?",
+  ).bind(id).first("attachment_revision");
+  // Collected before the DELETE so every attachment id is known ahead of the CASCADE that
+  // will wipe project_readme_attachments rows; the revision guard below re-checks the counter
+  // atomically inside the DELETE's WHERE clause, so the delete only proceeds if the attachment
+  // set collected here is still exactly what exists (no attachment mutated concurrently after
+  // we finished paging) — otherwise it safely no-ops and the caller gets a retryable error
+  // instead of an R2 object being orphaned by an untracked id.
+  const attachmentIds = await collectProjectReadmeAttachmentIds(env, id);
+  if (env.RACE_TEST_HOOK) {
+    await env.RACE_TEST_HOOK.fetch("http://race-test-hook/after-collect");
+  }
+  const result = await env.DB.prepare(`
+    DELETE FROM projects
+    WHERE id = ?
+      AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id = ?)
+      AND (SELECT attachment_revision FROM projects WHERE id = ?) = ?
+  `).bind(id, id, id, revisionAtStart).run();
+  if (!changed(result)) {
     const issueCount = Number(await env.DB.prepare(`
       SELECT COUNT(*) AS issue_count FROM tasks WHERE project_id = ?
     `).bind(id).first("issue_count"));
-    throw new ApiError(409, "PROJECT_NOT_EMPTY", "Project still contains issues", { issueCount });
+    if (issueCount > 0) {
+      throw new ApiError(409, "PROJECT_NOT_EMPTY", "Project still contains issues", { issueCount });
+    }
+    throw new ApiError(
+      409,
+      "PROJECT_ATTACHMENTS_CHANGED",
+      "Project's README attachments changed while deleting; retry the request",
+    );
   }
-  const attachmentIds = results[0].results.map((attachment) => attachment.id);
   await Promise.all(attachmentIds.map((attachmentId) => env.ATTACHMENTS.delete(attachmentId)));
   return project;
 }
@@ -2424,25 +2473,59 @@ async function restoreTask(env, id, input, actor) {
   return getTask(env, current.id);
 }
 
+async function collectTaskAttachmentIds(env, taskId) {
+  const ids = [];
+  let cursor = "";
+  for (;;) {
+    const page = await all(env.DB.prepare(`
+      SELECT id FROM attachments
+      WHERE task_id = ? AND id > ?
+      ORDER BY id
+      LIMIT ?
+    `).bind(taskId, cursor, ATTACHMENT_DELETE_PAGE_SIZE));
+    if (page.length === 0) return ids;
+    for (const row of page) ids.push(row.id);
+    cursor = page[page.length - 1].id;
+    if (page.length < ATTACHMENT_DELETE_PAGE_SIZE) return ids;
+  }
+}
+
 async function deleteArchivedTask(env, id, expectedVersion) {
   const current = await requireTaskRow(env, id);
   assertTaskVersion(current, expectedVersion);
   if (current.archived_at === null) {
     throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be deleted");
   }
-  const results = await env.DB.batch([
-    env.DB.prepare("SELECT id FROM attachments WHERE task_id = ?").bind(current.id),
-    env.DB.prepare(`
-      DELETE FROM tasks
-      WHERE id = ? AND version = ? AND archived_at IS NOT NULL
-    `).bind(current.id, expectedVersion),
-  ]);
-  if (!changed(results[1])) {
+  // requireTaskRow() is a `SELECT *`, so current.attachment_revision is already available here
+  // without a dedicated query — unlike deleteProject(), which needs one because getProject()
+  // returns a public-field subset. If requireTaskRow() is ever narrowed to a column subset,
+  // this needs to gain attachment_revision back explicitly.
+  const revisionAtStart = current.attachment_revision;
+  // See collectProjectReadmeAttachmentIds()'s sibling comment in deleteProject(): the revision
+  // guard in the DELETE's WHERE clause re-checks the counter atomically at delete time, so a
+  // concurrently-mutated attachment set aborts the delete (retryable) instead of being silently
+  // orphaned in R2 once the CASCADE removes rows from `attachments`.
+  const attachmentIds = await collectTaskAttachmentIds(env, current.id);
+  if (env.RACE_TEST_HOOK) {
+    await env.RACE_TEST_HOOK.fetch("http://race-test-hook/after-collect");
+  }
+  const result = await env.DB.prepare(`
+    DELETE FROM tasks
+    WHERE id = ? AND version = ? AND archived_at IS NOT NULL
+      AND (SELECT attachment_revision FROM tasks WHERE id = ?) = ?
+  `).bind(current.id, expectedVersion, current.id, revisionAtStart).run();
+  if (!changed(result)) {
     const latest = await requireTaskRow(env, current.id);
     assertTaskVersion(latest, expectedVersion);
-    throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be deleted");
+    if (latest.archived_at === null) {
+      throw new ApiError(409, "TASK_NOT_ARCHIVED", "Only archived tasks can be deleted");
+    }
+    throw new ApiError(
+      409,
+      "TASK_ATTACHMENTS_CHANGED",
+      "Task's attachments changed while deleting; retry the request",
+    );
   }
-  const attachmentIds = results[0].results.map((attachment) => attachment.id);
   await Promise.all(attachmentIds.map((attachmentId) => env.ATTACHMENTS.delete(attachmentId)));
 }
 

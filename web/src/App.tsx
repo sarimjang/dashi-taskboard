@@ -710,6 +710,7 @@ export function App() {
   const [recentProjectIds, setRecentProjectIds] = useState(readRecentProjectIds);
   const initialProjectId = query.get("project") ?? recentProjectIds[0] ?? ALL_PROJECTS_ID;
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectListTruncated, setProjectListTruncated] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjectId);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
@@ -1773,12 +1774,13 @@ export function App() {
       current?.operation === "initial" ? { ...current, requestId } : current
     ));
     try {
-      const [nextProjects, metadata, workspaces] = await Promise.all([
+      const [projectsResult, metadata, workspaces] = await Promise.all([
         listProjects(signal),
         getTaskboardMetadata(signal),
         listDeviceWorkspaces(signal),
       ]);
       if (requestId !== projectsRequestRef.current) return;
+      const nextProjects = projectsResult.projects;
       const [nextJiraConnection, nextTemporaryTasks] = await Promise.all([
         getJiraConnection(signal),
         listTasks(GLOBAL_PROJECT_ID, signal),
@@ -1810,6 +1812,7 @@ export function App() {
             )).length,
           }
         : project));
+      setProjectListTruncated(projectsResult.truncated);
       setJiraConnection(nextJiraConnection);
       setSelectedProjectId((current) => {
         const fromQuery = new URLSearchParams(window.location.search).get("project");
@@ -1848,11 +1851,12 @@ export function App() {
       current?.operation === "refresh" ? { ...current, requestId } : current
     ));
     try {
-      const [nextProjects, nextTemporaryTasks] = await Promise.all([
+      const [projectsResult, nextTemporaryTasks] = await Promise.all([
         listProjects(),
         listTasks(GLOBAL_PROJECT_ID),
       ]);
       if (requestId !== projectsRequestRef.current) return;
+      const nextProjects = projectsResult.projects;
       setProjects(nextProjects.map((project) => project.id === GLOBAL_PROJECT_ID
         ? {
             ...project,
@@ -1861,6 +1865,7 @@ export function App() {
             )).length,
           }
         : project));
+      setProjectListTruncated(projectsResult.truncated);
       setProjectLoadError((current) => (
         current?.operation === "refresh" && current.requestId === requestId ? null : current
       ));
@@ -3047,7 +3052,7 @@ export function App() {
           setProjects((current) => [...current, project!]);
         } catch (error) {
           if (!(error instanceof ApiError) || error.code !== "PROJECT_EXISTS") throw error;
-          const nextProjects = await listProjects();
+          const { projects: nextProjects } = await listProjects();
           setProjects(nextProjects);
           project = nextProjects.find((candidate) => candidate.id === choice.id) ?? null;
           if (!project) throw error;
@@ -3087,7 +3092,7 @@ export function App() {
     setJiraError(null);
     try {
       const connection = await configureJiraConnection(input);
-      const nextProjects = await listProjects();
+      const { projects: nextProjects } = await listProjects();
       setJiraConnection(connection);
       setProjects(nextProjects);
       setJiraDialogOpen(false);
@@ -3576,6 +3581,15 @@ export function App() {
             >
               {text("重试", "Try again")}
             </button>
+          </div>
+        )}
+
+        {projectListTruncated && (
+          <div className="notice-banner" role="status">
+            <p>{text(
+              "项目数量超出限制，仅显示前 500 个项目，还有更多项目未显示",
+              "The project list exceeds the limit — showing the first 500 projects, more are not shown",
+            )}</p>
           </div>
         )}
 

@@ -5273,6 +5273,20 @@ kbd {
   font-size: 10px;
 }
 
+.notice-banner {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 32px;
+  margin: 8px 12px 0;
+  padding: 6px 8px;
+  border: var(--border-hairline) solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+
+.notice-banner p { margin: 0; color: var(--text-secondary); font-size: 10px; }
+
 .loading-board {
   display: grid;
   grid-template-columns: repeat(3, minmax(260px, 1fr));

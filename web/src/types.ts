@@ -361,6 +361,11 @@ export interface Project {
   updatedAt: string;
 }
 
+export interface ProjectListResponse {
+  projects: Project[];
+  truncated: boolean;
+}
+
 export interface ProjectSummary {
   projectId: string;
   summary: string | null;

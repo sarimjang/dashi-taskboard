@@ -1127,6 +1127,53 @@ test("GET /api/tasks still returns tasks at exactly the 1,000-task cap", async (
   assert.equal(result.body.tasks.length, 1000);
 });
 
+test("GET /api/projects enforces the 500-project cap on its unfiltered listing", async () => {
+  const timestamp = new Date().toISOString();
+  const baseline = (
+    await cloud.db.prepare(`SELECT COUNT(*) AS count FROM projects`).all()
+  ).results[0].count;
+  const toBoundary = 500 - baseline;
+  assert.ok(
+    toBoundary > 0,
+    `test fixture assumption violated: ${baseline} projects already exist before this test`,
+  );
+
+  // GET /api/projects has no query params (requireNoQuery), so unlike /api/tasks this
+  // can't be scoped to one project's rows — it counts every project in the database.
+  // The insert count is therefore computed relative to whatever earlier tests in this
+  // file have already created, rather than hardcoded. A recursive CTE keeps this to a
+  // single D1 write instead of hundreds of API mutations.
+  await cloud.db.prepare(`
+    WITH RECURSIVE sequence(value) AS (
+      SELECT 1
+      UNION ALL
+      SELECT value + 1 FROM sequence WHERE value < ?
+    )
+    INSERT INTO projects (id, name, workspace_path, next_task_number, created_at, updated_at)
+    SELECT
+      'project-list-cap-' || value,
+      'Project list cap fixture ' || value,
+      NULL,
+      1,
+      ?,
+      ?
+    FROM sequence
+  `).bind(toBoundary, timestamp, timestamp).run();
+
+  const atCap = await cloud.request("/api/projects", { actorName: alice });
+  assert.equal(atCap.response.status, 200);
+  assert.equal(atCap.body.projects.length, 500);
+
+  await cloud.db.prepare(`
+    INSERT INTO projects (id, name, workspace_path, next_task_number, created_at, updated_at)
+    VALUES ('project-list-cap-over', 'Project list cap overflow fixture', NULL, 1, ?, ?)
+  `).bind(timestamp, timestamp).run();
+
+  const overCap = await cloud.request("/api/projects", { actorName: alice });
+  assert.equal(overCap.response.status, 413);
+  assert.equal(overCap.body.error.code, "PROJECT_LIST_TOO_LARGE");
+});
+
 test("concurrent inverse parent writes cannot create a cycle", async () => {
   await createProject("concurrent-parent-cycle");
   const first = await createTask("concurrent-parent-cycle", "First");

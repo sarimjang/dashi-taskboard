@@ -32,6 +32,13 @@ const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 const TASK_TREE_MAX_NODES = 1_000;
 const TASK_LIST_MAX_RESULTS = 1_000;
 const COMMENT_LIST_MAX_RESULTS = 1_000;
+// Projects are created one at a time via `taskctl project create` (one per tracked
+// repo/workspace), never bulk-generated like tasks or comments. This repo's own
+// multi-project workspace (app_develop/repo-study/*) tops out around 170 sibling
+// directories, so 500 stays ~3x above any legitimate scale observed in practice
+// while remaining far tighter than TASK_LIST_MAX_RESULTS, since GET /api/projects
+// has no query params (requireNoQuery) to narrow an oversized result.
+const PROJECT_LIST_MAX_RESULTS = 500;
 
 export class RealtimeHub extends DurableObject {
   async fetch(request) {
@@ -1723,6 +1730,13 @@ async function listProjects(env) {
       projects.updated_at
     ORDER BY projects.created_at, projects.id
   `));
+  if (rows.length > PROJECT_LIST_MAX_RESULTS) {
+    throw new ApiError(
+      413,
+      "PROJECT_LIST_TOO_LARGE",
+      `Project list cannot exceed ${PROJECT_LIST_MAX_RESULTS} results; delete unused projects to reduce the count`,
+    );
+  }
   return rows.map(projectFromRow);
 }
 

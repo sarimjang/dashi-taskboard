@@ -1127,7 +1127,7 @@ test("GET /api/tasks still returns tasks at exactly the 1,000-task cap", async (
   assert.equal(result.body.tasks.length, 1000);
 });
 
-test("GET /api/projects enforces the 500-project cap on its unfiltered listing", async () => {
+test("GET /api/projects truncates to the 500-project cap on its unfiltered listing", async () => {
   const timestamp = new Date().toISOString();
   const baseline = (
     await cloud.db.prepare(`SELECT COUNT(*) AS count FROM projects`).all()
@@ -1163,15 +1163,22 @@ test("GET /api/projects enforces the 500-project cap on its unfiltered listing",
   const atCap = await cloud.request("/api/projects", { actorName: alice });
   assert.equal(atCap.response.status, 200);
   assert.equal(atCap.body.projects.length, 500);
+  assert.equal(atCap.body.truncated, false);
 
   await cloud.db.prepare(`
     INSERT INTO projects (id, name, workspace_path, next_task_number, created_at, updated_at)
     VALUES ('project-list-cap-over', 'Project list cap overflow fixture', NULL, 1, ?, ?)
   `).bind(timestamp, timestamp).run();
 
+  // Over the cap: the endpoint no longer errors (a 413 here would be a permanent
+  // lockout — GET /api/projects has no query params to narrow the result, and
+  // deleteProject() rejects non-"temp-" ids, so there'd be no way to recover).
+  // It returns the first 500 rows (by the existing created_at/id ordering) with
+  // a truncation flag instead.
   const overCap = await cloud.request("/api/projects", { actorName: alice });
-  assert.equal(overCap.response.status, 413);
-  assert.equal(overCap.body.error.code, "PROJECT_LIST_TOO_LARGE");
+  assert.equal(overCap.response.status, 200);
+  assert.equal(overCap.body.projects.length, 500);
+  assert.equal(overCap.body.truncated, true);
 });
 
 test("concurrent inverse parent writes cannot create a cycle", async () => {

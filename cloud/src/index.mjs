@@ -1730,14 +1730,9 @@ async function listProjects(env) {
       projects.updated_at
     ORDER BY projects.created_at, projects.id
   `));
-  if (rows.length > PROJECT_LIST_MAX_RESULTS) {
-    throw new ApiError(
-      413,
-      "PROJECT_LIST_TOO_LARGE",
-      `Project list cannot exceed ${PROJECT_LIST_MAX_RESULTS} results; delete unused projects to reduce the count`,
-    );
-  }
-  return rows.map(projectFromRow);
+  const truncated = rows.length > PROJECT_LIST_MAX_RESULTS;
+  const page = truncated ? rows.slice(0, PROJECT_LIST_MAX_RESULTS) : rows;
+  return { projects: page.map(projectFromRow), truncated };
 }
 
 async function getProject(env, id) {
@@ -3332,7 +3327,8 @@ async function routeApi(request, env, actor, url) {
   if (pathname === "/api/projects") {
     if (request.method === "GET") {
       requireNoQuery(url, "GET /api/projects");
-      return json(200, { projects: await listProjects(env) });
+      const { projects, truncated } = await listProjects(env);
+      return json(200, { projects, truncated });
     }
     if (request.method === "POST") {
       return json(201, {

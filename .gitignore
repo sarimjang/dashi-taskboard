@@ -27,3 +27,4 @@ src-tauri/target/
 # Local agent/session scratch state (not project source)
 .codex-tmp/
 .omc/
+openspec//.vector-search.db*
